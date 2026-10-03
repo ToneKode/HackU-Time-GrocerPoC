@@ -9,7 +9,8 @@
     "person_2": "backend-policy",
     "person_3": "frontend",
     "person_4": "mockup-mall",
-    "persistance": "persistance"
+    "persistance": "persistance",
+    "payment": "payment"
   },
   "services": {
     "mock_api": {

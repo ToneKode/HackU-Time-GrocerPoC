@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from agent_graph import ShoppingAgent
-from clients import MallClient, PolicyClient, SpendClient
+from clients import MallClient, PaymentClient, PolicyClient, SpendClient
 from fake_mall import FileMall
 from models import ActionPlan, IntentIn
 
@@ -105,6 +105,9 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             spend=SpendClient(
                 os.environ.get("PERSISTANCE_API_BASE_URL", "http://localhost:8003"),
                 account_id=os.environ.get("ACCOUNT_ID", "demo"),
+            ),
+            payments=PaymentClient(
+                os.environ.get("PAYMENT_API_BASE_URL", "http://localhost:8004"),
             ),
         )
     shopping = agent

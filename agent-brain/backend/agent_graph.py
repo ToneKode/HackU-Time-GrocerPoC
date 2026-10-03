@@ -250,10 +250,11 @@ def _failure(name: str, event: str, reason: str) -> dict:
 
 
 class ShoppingAgent:
-    def __init__(self, mall, policy: PolicyClient, planner=None, spend=None):
+    def __init__(self, mall, policy: PolicyClient, planner=None, spend=None, payments=None):
         self.mall = mall
         self.policy = policy
         self.spend = spend
+        self.payments = payments
         self.planner = planner or OpenRouterPlanner()
         self.graph = self._build()
 
@@ -690,7 +691,21 @@ class ShoppingAgent:
             escalation_id = "none"
         try:
             route = state.get("payment_route") or "mastercard"
-            payment = self.mall.pay(float(total), f"{sku}:{qty}:{tag}:{escalation_id}", route)
+            key = f"{sku}:{qty}:{tag}:{escalation_id}"
+            payment = None
+            if self.payments is not None:
+                payment = self.payments.charge(
+                    amount=float(total),
+                    merchant=str(product.get("merchant") or (state.get("escalation") or {}).get("merchant") or "unknown"),
+                    account_id=state.get("account_id") or "demo",
+                    intent=str(state.get("intent") or ""),
+                    sku=str(sku or ""),
+                    qty=int(qty),
+                    rail=route,
+                    idempotency_key=key,
+                )
+            if payment is None:
+                payment = self.mall.pay(float(total), key, route)
         except Exception:
             return _failure("execute_payment", "PAYMENT", "Mall payment failed")
         plan_status = "COMPLETED" if payment["success"] else "FAILED"
@@ -698,11 +713,11 @@ class ShoppingAgent:
         log_status = "COMPLETED" if payment["success"] else "FAILED"
         if payment.get("success") and self.spend is not None:
             charged = float(payment.get("charged") if payment.get("charged") is not None else total)
-            order_id = payment.get("order_id") or f"{sku}:{qty}:{tag}:{escalation_id}"
+            order_id = payment.get("order_id") or payment.get("payment_id") or key
             self.spend.record_payment(
                 charged,
                 account_id=state.get("account_id") or "demo",
-                payment_id=payment.get("order_id"),
+                payment_id=payment.get("order_id") or payment.get("payment_id"),
                 idempotency_key=str(order_id),
                 note=f"intent={state.get('intent') or ''}",
             )

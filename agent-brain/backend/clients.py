@@ -333,3 +333,103 @@ class SpendClient:
             return None
         body = response.json()
         return body if isinstance(body, dict) else None
+
+
+class PaymentClient:
+    """Agentic payment control loop on :8004. Falls back to None when offline."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8004",
+        http: httpx.Client | None = None,
+        offline: bool = False,
+    ):
+        self.offline = offline
+        self.http = http or httpx.Client(base_url=base_url.rstrip("/"), timeout=2.0)
+
+    def draft(
+        self,
+        *,
+        amount: float,
+        merchant: str,
+        account_id: str = "demo",
+        intent: str = "",
+        sku: str = "",
+        qty: int = 1,
+        rail: str | None = None,
+    ) -> dict | None:
+        return self._request(
+            "POST",
+            "/payment/draft",
+            {
+                "account_id": account_id,
+                "amount": amount,
+                "currency": "HKD",
+                "merchant": merchant,
+                "intent": intent,
+                "sku": sku,
+                "qty": qty,
+                "rail": rail,
+            },
+        )
+
+    def authorize(self, payment_id: str, idempotency_key: str | None = None) -> dict | None:
+        return self._request(
+            "POST",
+            "/payment/authorize",
+            {"payment_id": payment_id, "idempotency_key": idempotency_key},
+        )
+
+    def charge(
+        self,
+        *,
+        amount: float,
+        merchant: str,
+        account_id: str,
+        intent: str,
+        sku: str,
+        qty: int,
+        rail: str,
+        idempotency_key: str,
+    ) -> dict | None:
+        """Draft + authorize. Returns a mall-shaped payment dict or None if offline."""
+        draft = self.draft(
+            amount=amount,
+            merchant=merchant,
+            account_id=account_id,
+            intent=intent,
+            sku=sku,
+            qty=qty,
+            rail=rail,
+        )
+        if not draft or not draft.get("payment_id"):
+            return None
+        result = self.authorize(draft["payment_id"], idempotency_key=idempotency_key)
+        if result is None:
+            return None
+        ok = result.get("status") == "CAPTURED"
+        return {
+            "success": ok,
+            "order_id": result.get("order_id"),
+            "charged": result.get("charged") if ok else None,
+            "currency": result.get("currency") or "HKD",
+            "payment_route": result.get("rail") or rail,
+            "ts": result.get("rail_ts") or result.get("updated_at"),
+            "error": result.get("error"),
+            "payment_id": result.get("payment_id"),
+            "receipt_id": result.get("receipt_id"),
+            "auth_id": result.get("auth_id"),
+        }
+
+    def _request(self, method: str, path: str, payload: dict | None) -> Any:
+        if self.offline:
+            return None
+        try:
+            response = self.http.request(method, path, json=payload)
+        except httpx.HTTPError:
+            self.offline = True
+            return None
+        if response.status_code >= 400:
+            return None
+        body = response.json()
+        return body if isinstance(body, dict) else None
