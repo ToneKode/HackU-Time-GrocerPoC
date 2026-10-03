@@ -16,11 +16,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+import httpx
 
 from agent_graph import ShoppingAgent
-from clients import MallClient, PolicyClient, SpendClient
+from clients import MallClient, PaymentClient, PolicyClient, ProfileClient, SpendClient
 from fake_mall import FileMall
-from models import ActionPlan, IntentIn
+from models import ActionPlan, IntentIn, PayResult
 
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 HOME = """<!DOCTYPE html>
@@ -46,6 +49,53 @@ def load_env(path: Path) -> None:
 
 
 load_env(Path(__file__).resolve().parent / ".env")
+
+
+class ConfirmPaymentIn(BaseModel):
+    payment_id: str = Field(min_length=1)
+    step_up_confirmed: bool = False
+    account_id: str | None = None
+
+
+class BasketLineIn(BaseModel):
+    sku: str = Field(min_length=1)
+    qty: int = 1
+
+
+class ConfirmBasketIn(BaseModel):
+    intent: str = ""
+    account_id: str | None = None
+    monthly_spent: float = 0
+    lines: list[BasketLineIn]
+    removed_skus: list[str] = Field(default_factory=list)
+
+
+class ApproveBasketIn(BaseModel):
+    amount: float
+    payment_id: str | None = None
+    step_up_confirmed: bool = False
+    account_id: str | None = None
+    payment_route: str = "mastercard"
+    merchant: str = ""
+
+
+def products_from_persistance(base: str) -> list[dict]:
+    """Full shelf for pricing. The planner still receives a short list."""
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                base.rstrip("/") + "/catalog/products",
+                params={"limit": 6000},
+            )
+            response.raise_for_status()
+            body = response.json()
+    except (httpx.HTTPError, ValueError, OSError):
+        return []
+    if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+        return []
+    if "id" not in body[0] or "price" not in body[0]:
+        return []
+    return body
 
 
 def _scripted_planner(intent: str, catalog: list[dict]) -> dict:
@@ -94,18 +144,24 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
     )
     if agent is None:
         mall_url = os.environ.get("MOCK_API_BASE_URL", "").strip()
-        mall = MallClient(mall_url) if mall_url else FileMall()
+        if mall_url:
+            mall = MallClient(mall_url)
+        else:
+            rows = products_from_persistance(
+                os.environ.get("PERSISTANCE_API_BASE_URL", "http://localhost:8003")
+            )
+            mall = FileMall(products=rows) if rows else FileMall()
         planner = None
         if os.environ.get("USE_SCRIPTED_PLANNER", "").lower() in {"1", "true", "yes"}:
             planner = _scripted_planner
+        persistance = os.environ.get("PERSISTANCE_API_BASE_URL", "http://localhost:8003")
         agent = ShoppingAgent(
             mall,
             PolicyClient(os.environ.get("POLICY_API_BASE_URL", "http://localhost:8001")),
             planner=planner,
-            spend=SpendClient(
-                os.environ.get("PERSISTANCE_API_BASE_URL", "http://localhost:8003"),
-                account_id=os.environ.get("ACCOUNT_ID", "demo"),
-            ),
+            spend=SpendClient(persistance, account_id=os.environ.get("ACCOUNT_ID", "demo")),
+            profile=ProfileClient(persistance),
+            payments=PaymentClient(os.environ.get("PAYMENT_API_BASE_URL", "http://localhost:8004")),
         )
     shopping = agent
 
@@ -122,6 +178,40 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             account_id=body.account_id,
         )
         return ActionPlan.model_validate(plan)
+
+    @app.post("/agent/payment/authorize", response_model=PayResult)
+    def agent_authorize(body: ConfirmPaymentIn) -> PayResult:
+        account = (body.account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        result = shopping.authorize_draft(
+            body.payment_id,
+            step_up_confirmed=body.step_up_confirmed,
+            account_id=account,
+        )
+        return PayResult.model_validate(result)
+
+    @app.post("/agent/basket/confirm", response_model=ActionPlan)
+    def basket_confirm(body: ConfirmBasketIn) -> ActionPlan:
+        plan = shopping.confirm_basket(
+            body.intent,
+            [line.model_dump() for line in body.lines],
+            body.removed_skus,
+            monthly_spent=body.monthly_spent,
+            account_id=body.account_id,
+        )
+        return ActionPlan.model_validate(plan)
+
+    @app.post("/agent/basket/approve", response_model=PayResult)
+    def basket_approve(body: ApproveBasketIn) -> PayResult:
+        account = (body.account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        result = shopping.approve_payment(
+            amount=body.amount,
+            payment_id=body.payment_id,
+            step_up_confirmed=body.step_up_confirmed,
+            account_id=account,
+            payment_route=body.payment_route,
+            merchant=body.merchant,
+        )
+        return PayResult.model_validate(result)
 
     return app
 

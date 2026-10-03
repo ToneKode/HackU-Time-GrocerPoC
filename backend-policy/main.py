@@ -89,6 +89,9 @@ class CheckPolicyIn(BaseModel):
     sku: str = ""
     qty: int = Field(default=1, ge=1)
     monthly_spent: float = Field(default=0, ge=0)
+    monthly_cap: float | None = Field(default=None, ge=0)
+    per_transaction_cap: float | None = Field(default=None, ge=0)
+    bulk_ceiling: float | None = Field(default=None, ge=0)
 
 
 class LogEventIn(BaseModel):
@@ -107,6 +110,9 @@ class CreateEscalationIn(BaseModel):
     qty: int = Field(default=1, ge=1)
     reason: str
     monthly_spent: float = Field(default=0, ge=0)
+    monthly_cap: float | None = Field(default=None, ge=0)
+    per_transaction_cap: float | None = Field(default=None, ge=0)
+    bulk_ceiling: float | None = Field(default=None, ge=0)
 
 
 class DecisionIn(BaseModel):
@@ -132,9 +138,17 @@ def health() -> dict:
     }
 
 
+def _caps(body) -> dict:
+    return {
+        "monthly_cap": body.monthly_cap,
+        "per_transaction_cap": body.per_transaction_cap,
+        "bulk_ceiling": body.bulk_ceiling,
+    }
+
+
 @app.post("/check_policy")
 def check_policy(body: CheckPolicyIn) -> dict:
-    return policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent)
+    return policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent, **_caps(body))
 
 
 @app.post("/log_event")
@@ -155,7 +169,7 @@ def verify_audit_log() -> dict:
 @app.post("/create_escalation")
 def create_escalation(body: CreateEscalationIn) -> dict:
     # Server-side guard: re-run the whole policy. Only an ESCALATE verdict may open an approval request.
-    check = policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent)
+    check = policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent, **_caps(body))
     if check["status"] != "ESCALATE":
         raise HTTPException(422, f"Cannot escalate: {check['reason']}")
     return escalations.create(body.amount, body.currency, body.merchant, body.sku, body.qty, body.reason)

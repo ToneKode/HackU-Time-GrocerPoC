@@ -15,6 +15,7 @@ const router = useRouter()
 const form = reactive({ email: '', password: '', remember: true })
 const submitted = ref(false)
 const busy = ref(false)
+const formError = ref('')
 
 const errors = computed(() => ({
   email: !form.email.trim() ? t('auth.errors.required') : !isEmail(form.email) ? t('auth.errors.email') : '',
@@ -24,11 +25,14 @@ const show = (field) => submitted.value && errors.value[field]
 
 async function submit() {
   submitted.value = true
+  formError.value = ''
   if (errors.value.email || errors.value.password) return
   busy.value = true
   try {
     await logIn({ email: form.email.trim(), password: form.password, remember: form.remember })
     router.push(route.query.redirect || '/')
+  } catch (error) {
+    formError.value = error.status === 401 ? t('auth.errors.rejected') : t('auth.errors.unavailable')
   } finally {
     busy.value = false
   }
@@ -72,6 +76,8 @@ async function submit() {
         <input v-model="form.remember" type="checkbox" />
         <span>{{ $t('auth.remember') }}</span>
       </label>
+
+      <p v-if="formError" class="auth-error" role="alert">{{ formError }}</p>
 
       <button type="submit" class="btn-primary auth-submit" :disabled="busy">
         <Icon :icon="Login01Icon" :size="18" /> {{ busy ? $t('auth.loggingIn') : $t('auth.logIn') }}

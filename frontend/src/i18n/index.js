@@ -5,6 +5,7 @@ import en from './en.js'
 import zhHant from './zh-Hant.js'
 import zhHans from './zh-Hans.js'
 import productsZh, { storeNamesZh, policyReasonsZh } from './products.js'
+import { categoryById } from '../data/catalog.js'
 
 export const LOCALES = [
   { code: 'en', label: 'English', date: 'en-HK' },
@@ -71,7 +72,9 @@ export function policyReason(text) {
 }
 
 export function categoryLabel(id) {
-  return i18n.global.t(`category.${id}`)
+  const key = `category.${id}`
+  if (i18n.global.te(key)) return i18n.global.t(key)
+  return categoryById[id]?.label || id
 }
 
 // "A, B and C" style list in the current language.

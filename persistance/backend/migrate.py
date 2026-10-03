@@ -4,12 +4,13 @@ from __future__ import annotations
 import sys
 
 from config import settings
-from db import apply_schema, ping
+from db import apply_schema, ensure_database, ping
 
 
 def main() -> int:
     s = settings()
     print(f"Migrating {s['database_url'].split('@')[-1]} ...")
+    ensure_database(s["database_url"])
     apply_schema(s["database_url"], s["schema_path"])
     ok = ping(s["database_url"])
     print("OK" if ok else "FAILED")

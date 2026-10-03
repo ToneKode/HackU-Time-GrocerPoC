@@ -18,8 +18,34 @@ def _in(value: str, options: list[str]) -> bool:
     return value.strip().casefold() in {o.casefold() for o in options}
 
 
-def evaluate(merchant: str, category: str, amount: float, monthly_spent: float) -> dict:
+def _cap(value: float | None, default: float) -> float:
+    return _money(default) if value is None else _money(value)
+
+
+def _hk(value: float) -> str:
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.2f}"
+
+
+def _whole(value: float) -> int:
+    return int(value) if value == int(value) else int(round(value))
+
+
+def evaluate(
+    merchant: str,
+    category: str,
+    amount: float,
+    monthly_spent: float,
+    monthly_cap: float | None = None,
+    per_transaction_cap: float | None = None,
+    bulk_ceiling: float | None = None,
+) -> dict:
+    """Caps default to the contract numbers. A shopper profile may override them."""
     amount, spent = _money(amount), _money(monthly_spent)
+    monthly = _cap(monthly_cap, MONTHLY_CAP)
+    per_order = _cap(per_transaction_cap, PER_TRANSACTION_CAP)
+    bulk = _cap(bulk_ceiling, BULK_CEILING)
 
     if _in(merchant, MERCHANT_BLACKLIST):
         status, rule, reason = "HALT", "merchant_blacklisted", REASONS["HALT_MERCHANT_BLACKLIST"]
@@ -27,16 +53,20 @@ def evaluate(merchant: str, category: str, amount: float, monthly_spent: float) 
         status, rule, reason = "HALT", "merchant_not_whitelisted", REASONS["HALT_MERCHANT"]
     elif _in(category, CATEGORY_BLACKLIST):
         status, rule, reason = "HALT", "category_blacklisted", REASONS["HALT_CATEGORY"]
-    elif spent + amount > MONTHLY_CAP:
-        status, rule, reason = "HALT", "monthly_cap", REASONS["HALT_MONTHLY"]
-    elif amount > BULK_CEILING:
-        status, rule, reason = "HALT", "over_bulk_ceiling", REASONS["HALT_BULK"]
-    elif amount > PER_TRANSACTION_CAP:
-        status, rule, reason = "ESCALATE", "over_per_transaction_cap", REASONS["ESCALATE"]
+    elif spent + amount > monthly:
+        status, rule = "HALT", "monthly_cap"
+        reason = REASONS["HALT_MONTHLY"] if monthly == _money(MONTHLY_CAP) else f"Over HK${_hk(monthly)} monthly cap"
+    elif amount > bulk:
+        status, rule = "HALT", "over_bulk_ceiling"
+        reason = REASONS["HALT_BULK"] if bulk == _money(BULK_CEILING) else f"Over HK${_hk(bulk)} bulk ceiling"
+    elif amount > per_order:
+        status, rule = "ESCALATE", "over_per_transaction_cap"
+        reason = REASONS["ESCALATE"] if per_order == _money(PER_TRANSACTION_CAP) else f"Over HK${_hk(per_order)} per-transaction cap"
     else:
-        status, rule, reason = "PASS", "pass", REASONS["PASS"]
+        status, rule = "PASS", "pass"
+        reason = REASONS["PASS"] if per_order == _money(PER_TRANSACTION_CAP) else f"Under HK${_hk(per_order)} cap"
 
-    remaining = MONTHLY_CAP - spent if status == "HALT" else MONTHLY_CAP - spent - amount
+    remaining = monthly - spent if status == "HALT" else monthly - spent - amount
     return {
         "status": status,
         "reason": reason,
@@ -44,8 +74,8 @@ def evaluate(merchant: str, category: str, amount: float, monthly_spent: float) 
         "currency": CURRENCY,
         "monthly_spent": spent,
         "monthly_remaining": _money(remaining),
-        "per_transaction_cap": int(PER_TRANSACTION_CAP),
-        "monthly_cap": int(MONTHLY_CAP),
-        "bulk_ceiling": int(BULK_CEILING),
+        "per_transaction_cap": _whole(per_order),
+        "monthly_cap": _whole(monthly),
+        "bulk_ceiling": _whole(bulk),
         "rule": rule,            # extra field: which rule fired (for the trace UI)
     }

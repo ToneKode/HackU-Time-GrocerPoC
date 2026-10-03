@@ -1,7 +1,7 @@
 """Persistance runtime settings.
 
-Postgres = durable audit ledger + monthly spend.
-Redis    = escalation TTL clock (same key scheme as backend-policy/escalations.py).
+MySQL  = audit ledger, monthly spend, profiles, orders, and the product shelf.
+Redis  = escalation TTL clock (same key scheme as backend-policy/escalations.py).
 """
 from __future__ import annotations
 
@@ -27,9 +27,11 @@ def settings() -> dict:
     return {
         "port": int(env("PERSISTANCE_PORT", "8003")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
+        # Host MySQL listens on 3306. Tests use time_grocer_test, not this
+        # database, because /demo/reset truncates audit and spend.
         "database_url": env(
             "DATABASE_URL",
-            "postgresql://tg:tg@127.0.0.1:5432/time_grocer",
+            "mysql://tg:tg@127.0.0.1:3306/time_grocer",
         ),
         "redis_url": env("REDIS_URL", "redis://127.0.0.1:6379/0"),
         "ttl": int(env("ESCALATION_TTL_SECONDS", "600")),

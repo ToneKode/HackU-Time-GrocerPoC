@@ -4,7 +4,7 @@
 // Account, language, theme, favourites and info pages.
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import {
-  Cancel01Icon, Login01Icon, UserAdd01Icon, Logout01Icon, TranslateIcon, Moon02Icon, FavouriteIcon,
+  Cancel01Icon, Login01Icon, UserAdd01Icon, Logout01Icon, TranslateIcon, Moon02Icon, FavouriteIcon, UserCheck01Icon,
   InformationCircleIcon, LegalDocument01Icon, ReturnRequestIcon, Shield01Icon,
   ArrowRight01Icon, ArrowLeft01Icon, Tick02Icon,
   Sun03Icon, ComputerIcon,
@@ -45,11 +45,25 @@ function chooseTheme(name) {
 }
 const router = useRouter()
 
-const settings = computed(() => [
-  { id: 'language', icon: TranslateIcon, label: t('menu.language'), value: currentLanguage.value, action: () => showView('language') },
-  { id: 'theme', icon: resolvedTheme.value === 'dark' ? Moon02Icon : Sun03Icon, label: t('menu.theme'), value: themeLabel(themePref.value), action: () => showView('theme') },
-  { id: 'favourites', icon: FavouriteIcon, label: t('menu.favourites'), count: favouriteCount.value, action: () => router.push('/favourites') },
-])
+const settings = computed(() => {
+  const rows = [
+    { id: 'language', icon: TranslateIcon, label: t('menu.language'), value: currentLanguage.value, action: () => showView('language') },
+    { id: 'theme', icon: resolvedTheme.value === 'dark' ? Moon02Icon : Sun03Icon, label: t('menu.theme'), value: themeLabel(themePref.value), action: () => showView('theme') },
+    { id: 'favourites', icon: FavouriteIcon, label: t('menu.favourites'), count: favouriteCount.value, action: () => router.push('/favourites') },
+  ]
+  if (session.user) {
+    rows.unshift({
+      id: 'profile',
+      icon: UserCheck01Icon,
+      label: t('menu.profile'),
+      action: () => {
+        router.push('/profile')
+        emit('close')
+      },
+    })
+  }
+  return rows
+})
 const pages = computed(() => [
   { id: 'about', icon: InformationCircleIcon, label: t('menu.about') },
   { id: 'terms', icon: LegalDocument01Icon, label: t('menu.terms') },

@@ -63,6 +63,24 @@ def test_blank_category_rejected(c):
     assert c.post("/check_policy", json={"merchant": "Watsons", "amount": 5}).status_code == 422
 
 
+def test_profile_caps_override_the_defaults(c):
+    widened = c.post("/check_policy", json={
+        "merchant": "Watsons", "category": "Household", "amount": 600,
+        "monthly_spent": 0, "monthly_cap": 5000, "per_transaction_cap": 1000, "bulk_ceiling": 2000,
+    }).json()
+    assert widened["status"] == "PASS"
+    assert widened["monthly_cap"] == 5000
+    assert widened["per_transaction_cap"] == 1000
+    assert widened["bulk_ceiling"] == 2000
+    tight = c.post("/check_policy", json={
+        "merchant": "Watsons", "category": "Household", "amount": 80,
+        "monthly_spent": 100, "monthly_cap": 150,
+    }).json()
+    assert tight["status"] == "HALT"
+    assert tight["reason"] == "Over HK$150 monthly cap"
+    assert tight["monthly_remaining"] == 50
+
+
 def test_rules_match_cross_team_config():
     path = os.path.join(os.path.dirname(__file__), "..", "agent-brain", "cross_team_config.json")
     if not os.path.exists(path):

@@ -43,8 +43,9 @@ REASONS = {
     "HALT_CATEGORY": "Category blacklisted",
 }
 
-# Defaults match persistance/compose.yaml
-PERSISTANCE_DATABASE_URL = "postgresql://tg:tg@127.0.0.1:5432/time_grocer"
+# The shop database is MySQL on port 3306. Compose still publishes a Postgres
+# container on 5432; the app does not use that unless DATABASE_URL says so.
+PERSISTANCE_DATABASE_URL = "mysql://tg:tg@127.0.0.1:3306/time_grocer"
 PERSISTANCE_REDIS_URL = "redis://127.0.0.1:6379/0"
 
 
@@ -52,13 +53,19 @@ def env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
-def _pg_reachable(url: str) -> bool:
+def _db_reachable(url: str) -> bool:
+    if not url.startswith("mysql"):
+        return False
     try:
-        import psycopg
-        with psycopg.connect(url, connect_timeout=1) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                return cur.fetchone() is not None
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "persistance" / "backend"
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from db import ping
+
+        return ping(url)
     except Exception:
         return False
 
@@ -90,8 +97,8 @@ def _database_url() -> str | None:
     if "DATABASE_URL" in os.environ:
         url = os.environ["DATABASE_URL"].strip()
         return url or None
-    if _pg_reachable(PERSISTANCE_DATABASE_URL):
-        log.info("Auto-detected persistance Postgres at %s", PERSISTANCE_DATABASE_URL.split("@")[-1])
+    if _db_reachable(PERSISTANCE_DATABASE_URL):
+        log.info("Auto-detected shop MySQL at %s", PERSISTANCE_DATABASE_URL.split("@")[-1])
         return PERSISTANCE_DATABASE_URL
     return None
 

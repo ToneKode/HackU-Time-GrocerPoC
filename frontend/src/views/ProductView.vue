@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { productById, products, categoryById, merchantByName } from '../data/catalog.js'
 import { sortedOffers, bestOffer, discountPct } from '../lib/pricing.js'
@@ -23,6 +23,8 @@ const { t } = useI18n()
 const router = useRouter()
 
 const product = computed(() => productById[route.params.id])
+const photoBroken = ref(false)
+watch(() => product.value?.id, () => { photoBroken.value = false })
 const category = computed(() => categoryById[product.value?.category])
 const offers = computed(() => sortedOffers(product.value))
 const best = computed(() => bestOffer(product.value))
@@ -112,7 +114,8 @@ function goBack() {
         >
           <Icon :icon="FavouriteIcon" :size="18" />
         </button>
-        <span class="product-emoji pd-emoji" aria-hidden="true">{{ product.emoji }}</span>
+        <img v-if="product.imageUrl && !photoBroken" class="product-photo" :src="product.imageUrl" alt="" @error="photoBroken = true" />
+        <span v-else class="product-emoji pd-emoji" aria-hidden="true">{{ product.emoji }}</span>
         <span class="size">{{ productSize(product) }}</span>
       </div>
 

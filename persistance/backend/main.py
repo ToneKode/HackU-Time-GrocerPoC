@@ -1,11 +1,12 @@
-"""Persistance API — Postgres audit/spend + Redis health. Port 8003.
+"""Persistance API — MySQL audit/spend/catalog + Redis health. Port 8003.
 
 Owns the durable stores. Person 2 (backend-policy :8001) owns the public contract
 for policy checks and escalation TTL decisions; this service exposes:
 
   - health / demo reset
-  - hash-chained audit ledger (Postgres)
-  - monthly spend (Postgres) — agent reads before policy, writes after pay
+  - hash-chained audit ledger (MySQL)
+  - monthly spend (MySQL) — agent reads before policy, writes after pay
+  - product shelf (MySQL) — the shop reads GET /catalog/products
 
 Escalation HTTP create/decide live only on :8001 so the agent has one owner.
 Redis keys are still shared when REDIS_URL points at the same instance.
@@ -17,14 +18,17 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 import redis
+from pymysql.err import InterfaceError, OperationalError
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from audit_store import PostgresAuditLog, compute_hash
+from catalog_store import CatalogStore
 from config import settings
-from db import apply_schema, ping as pg_ping
+from db import apply_schema, ensure_database, ping as pg_ping
+from profile_store import AccountExists, BadPayment, NotFound, ProfileStore
 from redis_client import flush_escalations, make_redis
 from spend_store import SpendStore
 
@@ -33,18 +37,24 @@ S = settings()
 
 audit = PostgresAuditLog(S["database_url"])
 spend = SpendStore(S["database_url"])
+profile = ProfileStore(S["database_url"])
+catalog = CatalogStore(S["database_url"])
 redis_client = make_redis(S["redis_url"])
 USING_FAKEREDIS = S["redis_url"].startswith("fakeredis")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    apply_schema(S["database_url"], S["schema_path"])
+    try:
+        ensure_database(S["database_url"])
+        apply_schema(S["database_url"], S["schema_path"])
+    except Exception as exc:
+        log.error("MySQL schema was not applied: %s", exc)
     try:
         pg_ping(S["database_url"])
-        log.info("Postgres ready")
+        log.info("MySQL ready")
     except Exception as exc:
-        log.error("Postgres unavailable: %s", exc)
+        log.error("MySQL unavailable: %s", exc)
     if USING_FAKEREDIS:
         log.warning("REDIS_URL is fakeredis — use persistance Redis for real TTLs")
     else:
@@ -105,25 +115,34 @@ class SpendRecordIn(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    postgres_ok = False
+    mysql_ok = False
     redis_ok = False
     try:
-        postgres_ok = pg_ping(S["database_url"])
+        mysql_ok = pg_ping(S["database_url"])
     except Exception:
-        postgres_ok = False
+        mysql_ok = False
     try:
         redis_ok = bool(redis_client.ping())
     except redis.RedisError:
         redis_ok = False
+    catalog_products = None
+    if mysql_ok:
+        try:
+            catalog_products = catalog.count()
+        except Exception:
+            catalog_products = None
     return {
-        "ok": postgres_ok and redis_ok,
-        "postgres": postgres_ok,
+        "ok": mysql_ok and redis_ok,
+        "mysql": mysql_ok,
         "redis": redis_ok,
-        "audit_entries": len(audit.entries()) if postgres_ok else None,
+        "audit_entries": len(audit.entries()) if mysql_ok else None,
+        "catalog_products": catalog_products,
         "store": {
-            "audit": "postgres",
+            "audit": "mysql",
             "escalations": "policy:8001+redis",
-            "spend": "postgres",
+            "spend": "mysql",
+            "profile": "mysql",
+            "catalog": "mysql",
         },
         "escalation_owner": "backend-policy:8001",
     }
@@ -186,6 +205,302 @@ def demo_reset() -> dict:
     spend.reset()
     removed = flush_escalations(redis_client)
     return {"reset": True, "escalation_keys_removed": removed}
+
+
+class RegisterIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
+    name: str = Field(min_length=1, max_length=80)
+    phone: str = ""
+    marketing: bool = False
+
+
+class LoginIn(BaseModel):
+    email: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class LimitsIn(BaseModel):
+    monthly_cap: float | None = Field(default=None, ge=0)
+    per_order_cap: float | None = Field(default=None, ge=0)
+    bulk_ceiling: float | None = Field(default=None, ge=0)
+    membership: str | None = None
+
+
+class PaymentMethodIn(BaseModel):
+    route: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=80)
+    last4: str = ""
+    connected: bool = True
+    is_default: bool = False
+
+
+class OrderOpenIn(BaseModel):
+    account_id: str = Field(min_length=1)
+    intent: str = Field(min_length=1)
+
+
+class CheckpointIn(BaseModel):
+    step: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    snapshot: dict = Field(default_factory=dict)
+    amount: float | None = Field(default=None, ge=0)
+    merchant: str | None = None
+    payment_route: str | None = None
+    payment_id: str | None = None
+    escalation_id: str | None = None
+    lines: list[dict] | None = None
+
+
+class ChatIn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+    order_id: str | None = None
+
+
+class TaskIn(BaseModel):
+    intent: str = Field(min_length=1)
+    cadence: str = "monthly"
+
+
+class PreferenceMethodIn(BaseModel):
+    id: str | None = None
+    route: str | None = None
+    connected: bool = True
+
+
+class PreferencesIn(BaseModel):
+    benefit_rank: list[str] | None = None
+    methods: list[PreferenceMethodIn] | None = None
+
+
+class SettleLineIn(BaseModel):
+    sku: str = ""
+    name: str = ""
+    merchant: str = ""
+    category: str = ""
+    qty: int = 1
+    unit_price: float = 0
+    line_total: float = 0
+
+
+class BenefitIn(BaseModel):
+    kind: str
+    amount: float = 0
+    detail: str = ""
+
+
+class SettleIn(BaseModel):
+    amount: float = Field(gt=0)
+    currency: Literal["HKD"] = "HKD"
+    merchant: str = ""
+    payment_route: str = ""
+    payment_id: str | None = None
+    intent: str = ""
+    lines: list[SettleLineIn] = Field(default_factory=list)
+    settlement: dict | None = None
+    benefits: list[BenefitIn] = Field(default_factory=list)
+
+
+def _profile_call(fn):
+    try:
+        return fn()
+    except AccountExists:
+        raise HTTPException(409, "An account with this email already exists")
+    except NotFound:
+        raise HTTPException(404, "Unknown account or order")
+    except BadPayment as exc:
+        raise HTTPException(422, str(exc))
+    except (OperationalError, InterfaceError):
+        raise HTTPException(503, "Database unavailable")
+
+
+def _email_ok(email: str) -> bool:
+    host = email.split("@")[-1] if "@" in email else ""
+    return "@" in email and not email.startswith("@") and "." in host
+
+
+@app.post("/accounts/register")
+def register_account(body: RegisterIn) -> dict:
+    email = body.email.strip().lower()
+    if not _email_ok(email):
+        raise HTTPException(422, "Enter a valid email address")
+    return _profile_call(
+        lambda: profile.register(email, body.password, body.name, body.phone, body.marketing)
+    )
+
+
+@app.post("/accounts/login")
+def login_account(body: LoginIn) -> dict:
+    found = _profile_call(lambda: profile.authenticate(body.email, body.password))
+    if found is None:
+        raise HTTPException(401, "Email or password is wrong")
+    return found
+
+
+@app.get("/accounts/{account_id}/profile")
+def get_profile(account_id: str) -> dict:
+    return _profile_call(lambda: profile.profile(account_id))
+
+
+@app.patch("/accounts/{account_id}/limits")
+def patch_limits(account_id: str, body: LimitsIn) -> dict:
+    return _profile_call(
+        lambda: profile.update_limits(
+            account_id,
+            monthly_cap=body.monthly_cap,
+            per_order_cap=body.per_order_cap,
+            bulk_ceiling=body.bulk_ceiling,
+            membership=body.membership,
+        )
+    )
+
+
+@app.post("/accounts/{account_id}/payment-methods")
+def add_payment_method(account_id: str, body: PaymentMethodIn) -> dict:
+    return _profile_call(
+        lambda: profile.add_payment_method(
+            account_id,
+            body.route,
+            body.label,
+            body.last4,
+            connected=body.connected,
+            is_default=body.is_default,
+        )
+    )
+
+
+@app.patch("/accounts/{account_id}/preferences")
+def patch_preferences(account_id: str, body: PreferencesIn) -> dict:
+    methods = [item.model_dump() for item in body.methods] if body.methods is not None else None
+    return _profile_call(
+        lambda: profile.save_preferences(account_id, body.benefit_rank, methods)
+    )
+
+
+@app.post("/accounts/{account_id}/orders/settle")
+def settle_order(account_id: str, body: SettleIn) -> dict:
+    try:
+        saved = profile.record_paid(
+            account_id,
+            body.amount,
+            currency=body.currency,
+            merchant=body.merchant,
+            payment_route=body.payment_route,
+            payment_id=body.payment_id,
+            intent=body.intent,
+            lines=[line.model_dump() for line in body.lines],
+            settlement=body.settlement,
+            benefits=[item.model_dump() for item in body.benefits],
+        )
+    except NotFound:
+        raise HTTPException(404, "Unknown account or order")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except (OperationalError, InterfaceError):
+        raise HTTPException(503, "Database unavailable")
+    if not saved["duplicate"]:
+        saved["audit"] = audit.append(
+            "ORDER_PAID",
+            "COMPLETED",
+            f"{saved['order_id']} HK${body.amount:.2f}",
+            body.intent or "approved basket",
+        )
+    return saved
+
+
+@app.get("/accounts/{account_id}/orders")
+def list_orders(
+    account_id: str,
+    status: str | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> list[dict]:
+    return _profile_call(lambda: profile.list_orders(account_id, status=status, limit=limit))
+
+
+@app.get("/accounts/{account_id}/chat")
+def list_chat(account_id: str, limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+    return _profile_call(lambda: profile.list_chat(account_id, limit))
+
+
+@app.post("/accounts/{account_id}/chat")
+def add_chat(account_id: str, body: ChatIn) -> dict:
+    return _profile_call(lambda: profile.add_chat(account_id, body.role, body.content, body.order_id))
+
+
+@app.delete("/accounts/{account_id}/chat")
+def delete_chat(account_id: str) -> dict:
+    removed = _profile_call(lambda: profile.clear_chat(account_id))
+    return {"cleared": True, "removed": removed}
+
+
+@app.get("/accounts/{account_id}/tasks")
+def list_tasks(account_id: str) -> list[dict]:
+    return _profile_call(lambda: profile.list_tasks(account_id))
+
+
+@app.post("/accounts/{account_id}/tasks")
+def add_task(account_id: str, body: TaskIn) -> dict:
+    return _profile_call(lambda: profile.add_task(account_id, body.intent, body.cadence))
+
+
+@app.get("/accounts/{account_id}/agent-history")
+def agent_history(account_id: str, limit: int = Query(default=20, ge=1, le=50)) -> list[dict]:
+    return _profile_call(lambda: profile.list_agent_history(account_id, limit))
+
+
+@app.post("/orders")
+def open_order(body: OrderOpenIn) -> dict:
+    return _profile_call(lambda: profile.open_order(body.account_id, body.intent))
+
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: str) -> dict:
+    return _profile_call(lambda: profile.get_order(order_id))
+
+
+@app.post("/orders/{order_id}/checkpoint")
+def save_checkpoint(order_id: str, body: CheckpointIn) -> dict:
+    return _profile_call(
+        lambda: profile.checkpoint(
+            order_id,
+            step=body.step,
+            status=body.status,
+            snapshot=body.snapshot,
+            amount=body.amount,
+            merchant=body.merchant,
+            payment_route=body.payment_route,
+            payment_id=body.payment_id,
+            escalation_id=body.escalation_id,
+            lines=body.lines,
+        )
+    )
+
+
+@app.get("/catalog/categories")
+def catalog_categories() -> list[dict]:
+    return _profile_call(lambda: catalog.categories())
+
+
+@app.get("/catalog/products")
+def catalog_products(
+    q: str = "",
+    merchant: str = "",
+    category: str = "",
+    limit: int = Query(default=48, ge=1, le=6000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict]:
+    return _profile_call(
+        lambda: catalog.search(q, merchant=merchant, category=category, limit=limit, offset=offset)
+    )
+
+
+@app.get("/catalog/products/{sku}")
+def catalog_product(sku: str) -> dict:
+    row = _profile_call(lambda: catalog.get(sku))
+    if row is None:
+        raise HTTPException(404, "Unknown SKU")
+    return row
 
 
 @app.get("/_meta/hash_fields")

@@ -10,14 +10,14 @@ py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8001
 pytest -q
 ```
 
-By default, if `DATABASE_URL` / `REDIS_URL` are unset, this service probes the
-persistance compose defaults (`127.0.0.1:5432` / `:6379`) and uses them when
+By default, if `DATABASE_URL` / `REDIS_URL` are unset, this service probes
+the host Postgres on `127.0.0.1:2000` (and Redis on `:6379`) and uses them when
 reachable; otherwise it keeps JSONL + in-process fakeredis.
 
 ```bash
 cd persistance && ./start-stores.sh
 # optional explicit exports:
-export DATABASE_URL=postgresql://tg:tg@127.0.0.1:5432/time_grocer
+export DATABASE_URL=postgresql://tg:tg@127.0.0.1:2000/time_grocer
 export REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
@@ -27,7 +27,7 @@ Tests still force fakeredis + a temp JSONL file via `conftest.py`.
 ## Endpoints
 | Method | Path | Who calls it | Notes |
 |---|---|---|---|
-| POST | `/check_policy` | Person 1 (`check_budget`) | `{merchant, category, amount, currency, sku, qty, monthly_spent}` (`category` must be non-empty) -> PolicyResult (+ extra `rule`) |
+| POST | `/check_policy` | Person 1 (`check_budget`) | Same body as before, plus optional `monthly_cap`, `per_transaction_cap`, `bulk_ceiling` from the shopper profile. Omitted caps stay 2000 / 500 / 800. |
 | POST | `/log_event` | Person 1 | `{event, status, reason, thought?}` -> LogEntry. `thought` is shown in the UI but not hashed |
 | GET | `/audit_log` | Person 3 | AuditEntry[] ascending by index |
 | GET | `/audit_log/verify` | Person 3 | `{valid, broken_at, reason}`; re-reads the file, so edits are detected |

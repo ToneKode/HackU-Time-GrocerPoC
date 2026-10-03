@@ -46,6 +46,12 @@ class Escalations:
     def __init__(self, r, audit: AuditLog, ttl: int, secret: str):
         self.r, self.audit, self.ttl, self.secret = r, audit, ttl, secret.encode()
 
+    def ping(self) -> bool:
+        return bool(self.r.ping())
+
+    def reset_state(self) -> None:
+        self.r.flushdb()
+
     @staticmethod
     def _k(kind: str, id_: str) -> str:
         return f"esc:{kind}:{id_}"

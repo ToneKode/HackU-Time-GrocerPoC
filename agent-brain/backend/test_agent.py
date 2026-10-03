@@ -13,7 +13,7 @@ from basket import choose_best_merchant, choose_payment, fit_basket, needs_from
 from clients import PolicyClient
 from fake_mall import FileMall
 from openrouter import OpenRouterPlanner, PlannerError, parse_decision
-from pick import resolve_pick
+from pick import planner_shelf, resolve_pick
 from policy_rules import decide
 from server import create_app
 
@@ -77,6 +77,31 @@ def client() -> tuple[TestClient, PolicyClient]:
     policy = PolicyClient(offline=True)
     app = create_app(ShoppingAgent(FileMall(), policy, scripted))
     return TestClient(app), policy
+
+
+def basket_lines(body: dict) -> list[dict]:
+    if body.get("lines"):
+        return [{"sku": line["sku"], "qty": line["qty"]} for line in body["lines"]]
+    return [{"sku": body["product"]["id"], "qty": body["goal"]["qty"]}]
+
+
+def approve_reviewed(api: TestClient, body: dict) -> tuple[dict, dict]:
+    confirmed = api.post(
+        "/agent/basket/confirm",
+        json={"intent": body["intent"], "monthly_spent": 0, "lines": basket_lines(body)},
+    ).json()
+    assert confirmed["status"] == "READY", confirmed.get("reply")
+    assert confirmed["payment"] is None
+    merchant = confirmed["settlement"]["merchants"][0]
+    paid = api.post(
+        "/agent/basket/approve",
+        json={
+            "amount": confirmed["settlement"]["total"],
+            "payment_route": merchant["payment"]["route"] or "mastercard",
+            "merchant": merchant["merchant"],
+        },
+    ).json()
+    return confirmed, paid
 
 
 def assert_chain(entries: list[dict]) -> None:
@@ -161,7 +186,7 @@ def test_cheap_toilet_paper_passes_and_pays() -> None:
     response = api.post("/agent/intent", json={"intent": "cheap toilet paper", "monthly_spent": 0})
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert body["goal"]["sell_point"] == "cheap"
     assert body["goal"]["model"] == "scripted"
     assert body["product"]["id"] == "SKU001"
@@ -173,21 +198,20 @@ def test_cheap_toilet_paper_passes_and_pays() -> None:
     assert body["policy"]["rule"] == "pass"
     assert body["policy"]["monthly_remaining"] == 1940.1
     assert body["escalation"] is None
-    assert body["payment"]["success"] is True
-    assert body["payment"]["charged"] == 59.9
-    assert "reward_points_earned" not in body["payment"]
+    assert body["payment"] is None
+    assert body["settlement"]["total"] == 59.9
     assert events(body) == [
         "INTENT_RECEIVED",
         "PLAN",
         "SEARCH",
         "CART_PRICED",
         "POLICY_CHECK",
-        "PAYMENT",
+        "BASKET_REVIEW",
     ]
     assert body["audit_log"][4]["status"] == "PASS"
     policy_step = next(step for step in body["react"] if step["action"] == "POLICY_CHECK")
     assert policy_step["source"] == "agent"
-    assert "Policy engine result" in policy_step["thought"]
+    assert "checked pass passed" in policy_step["thought"]
     assert "PASS" in policy_step["observation"]
     assert "pass" in policy_step["observation"]
     assert body["audit_log"][4]["result"]["status"] == "PASS"
@@ -195,9 +219,13 @@ def test_cheap_toilet_paper_passes_and_pays() -> None:
     assert body["audit_log"][4]["result"]["amount"] == 59.9
     assert body["audit_log"][4]["result"]["monthly_remaining"] == 1940.1
     assert body["audit_log"][4]["result"]["per_transaction_cap"] == 500
-    assert "Policy engine result" in body["audit_log"][4]["thought"]
-    assert body["audit_log"][-1]["status"] == "COMPLETED"
+    assert "checked pass passed" in body["audit_log"][4]["thought"]
+    assert body["audit_log"][-1]["status"] == "READY"
     assert_chain(body["audit_log"])
+    _confirmed, paid = approve_reviewed(api, body)
+    assert paid["success"] is True
+    assert paid["charged"] == 59.9
+    assert "reward_points_earned" not in paid
 
 
 def test_monthly_cap_halts_before_pay() -> None:
@@ -229,12 +257,14 @@ def test_best_rated_earbuds_escalate_and_everyday_rice_pays() -> None:
     assert events(earbuds)[-1] == "ESCALATION_CREATED"
     assert_chain(earbuds["audit_log"])
     rice = api.post("/agent/intent", json={"intent": "everyday rice"}).json()
-    assert rice["status"] == "COMPLETED"
+    assert rice["status"] == "READY"
     assert rice["product"]["id"] == "SKU005"
     assert rice["goal"]["sell_point"] == "highest_usage"
     assert rice["quote"]["total_landed_cost"] == 98.0
     assert rice["policy"]["status"] == "PASS"
-    assert rice["payment"]["charged"] == 98.0
+    assert rice["payment"] is None
+    _confirmed, paid = approve_reviewed(api, rice)
+    assert paid["charged"] == 98.0
 
 
 def test_shampoo_escalates_then_pays_when_approved() -> None:
@@ -347,6 +377,41 @@ def _quote_shelf(catalog: list[dict], items: list[dict]) -> dict:
     }
 
 
+def test_cheap_pick_keeps_quantity_per_dollar_and_a_close_promo() -> None:
+    catalog = [
+        _shelf_item("BOWL", "rice bowl", 11.9, "Japan Home Centre", "cheap"),
+        _shelf_item("COOKER", "rice cooker", 219.0, "Japan Home Centre", "cheap"),
+    ]
+    needs = needs_from({"needs": [{"query": "rice", "qty": 1, "sell_point": "cheap", "priority": 1}]})
+    fitted = fit_basket(
+        catalog,
+        needs,
+        0,
+        lambda items: _quote_shelf(catalog, items),
+        PolicyClient(offline=True).check_lines,
+    )
+    assert fitted["lines"][0]["sku"] == "BOWL"
+    thought = next(event["thought"] for event in fitted["events"] if event["event"] == "BASKET_PICKED")
+    assert "asked for cheap" in thought
+    assert "quantity per dollar" in thought
+    assert "connected tender" in thought
+    assert "rice cooker" in thought
+
+    near = [
+        _shelf_item("PLAIN", "rice bowl plain", 11.9, "Japan Home Centre", "cheap"),
+        _shelf_item("WAT", "rice bowl watsons", 12.5, "Watsons", "cheap"),
+    ]
+    fitted = fit_basket(
+        near,
+        needs_from({"needs": [{"query": "rice bowl", "qty": 1, "sell_point": "cheap", "priority": 1}]}),
+        0,
+        lambda items: _quote_shelf(near, items),
+        PolicyClient(offline=True).check_lines,
+    )
+    assert fitted["lines"][0]["sku"] == "WAT"
+    assert "Watsons" in next(event["thought"] for event in fitted["events"] if event["event"] == "BASKET_PICKED")
+
+
 def test_repick_keeps_the_sell_point_and_logs_both_policy_checks() -> None:
     catalog = [_shelf_item(f"S{i}", f"staple {i}", 50, "Watsons", "cheap") for i in range(1, 9)]
     catalog.append(_shelf_item("PAPER-BEST", "paper premium", 90, "Watsons", "best_rating"))
@@ -433,18 +498,20 @@ def test_two_merchants_pass_policy_and_pay() -> None:
     policy = PolicyClient(offline=True)
     api = TestClient(create_app(ShoppingAgent(FileMall(), policy, planner)))
     body = api.post("/agent/intent", json={"intent": "toilet paper and a food container"}).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert [line["sku"] for line in body["lines"]] == ["SKU001", "SKU028"]
     assert {line["merchant"] for line in body["lines"]} == {"Watsons", "Japan Home Centre"}
     assert body["lines"][0]["product_reason"]
     assert body["lines"][0]["merchant_reason"]
     assert body["quote"]["total_landed_cost"] == 79.8
     assert body["policy"]["status"] == "PASS"
-    assert body["payment"]["charged"] == 79.8
-    assert body["payment_route"]
+    assert body["payment"] is None
+    assert {row["merchant"] for row in body["settlement"]["merchants"]} == {"Watsons", "Japan Home Centre"}
     assert body["question"] == ""
     assert [entry["event"] for entry in body["audit_log"]].count("POLICY_CHECK") >= 3
     assert_chain(body["audit_log"])
+    _confirmed, paid = approve_reviewed(api, body)
+    assert paid["charged"] == 79.8
 
 
 def test_basket_asks_before_it_drops_a_requested_sell_point() -> None:
@@ -483,22 +550,24 @@ def test_food_in_a_basket_halts_and_is_logged() -> None:
 
     api = TestClient(create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), planner)))
     body = api.post("/agent/intent", json={"intent": "toilet paper and rice"}).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert [line["sku"] for line in body["lines"]] == ["SKU001", "SKU005"]
     assert body["quote"]["total_landed_cost"] == 127.9
     assert body["policy"]["status"] == "PASS"
     assert body["policy"]["amount"] == 127.9
-    assert body["payment"]["charged"] == 127.9
+    assert body["payment"] is None
     logged = [entry["reason"] for entry in body["audit_log"] if entry["event"] == "POLICY_CHECK"]
     assert any("SKU005" in reason and "Under HK$500 cap" in reason for reason in logged)
     assert any("SKU001" in reason for reason in logged)
     assert_chain(body["audit_log"])
+    _confirmed, paid = approve_reviewed(api, body)
+    assert paid["charged"] == 127.9
 
 
 def test_one_cheap_item_from_every_category_shows_each_decision() -> None:
     api = TestClient(create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), scripted)))
     body = api.post("/agent/intent", json={"intent": "one cheap item from every category"}).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert body["goal"]["model"] == "catalog"
     assert [line["sku"] for line in body["lines"]] == [
         "SKU001",
@@ -515,7 +584,8 @@ def test_one_cheap_item_from_every_category_shows_each_decision() -> None:
     assert body["quote"]["total_landed_cost"] == 326.6
     assert body["policy"]["status"] == "PASS"
     assert body["policy"]["amount"] == 326.6
-    assert body["payment"]["charged"] == 326.6
+    assert body["payment"] is None
+    assert body["settlement"]["total"] == 326.6
     checks = [entry for entry in body["audit_log"] if entry["event"] == "POLICY_CHECK"]
     assert len(checks) == 11
     for entry in checks:
@@ -527,7 +597,8 @@ def test_one_cheap_item_from_every_category_shows_each_decision() -> None:
         assert result["per_transaction_cap"] == 500
         assert result["bulk_ceiling"] == 800
         assert result["monthly_cap"] == 2000
-        assert f"rule {result['rule']}" in entry["thought"]
+        assert f"checked {result['rule']}" in entry["thought"]
+        assert entry["thought"].endswith("passed") or entry["thought"].endswith("failed")
     by_sku = {}
     for entry in checks:
         for sku in ("SKU001", "SKU004", "SKU013", "SKU025", "SKU028"):
@@ -544,6 +615,8 @@ def test_one_cheap_item_from_every_category_shows_each_decision() -> None:
     assert "Food SKU004" in picked["reason"]
     assert "Electronics SKU025" in picked["reason"]
     assert "asked for cheap" in picked["thought"]
+    assert "quantity per dollar" in picked["thought"]
+    assert "connected tender" in picked["thought"]
     assert "HALTED" not in events(body)
     assert any("basket landed 326.60" in entry["reason"] for entry in body["audit_log"])
     assert "one cheap item from each category" in body["audit_log"][0]["thought"].casefold()
@@ -606,11 +679,12 @@ def test_named_shop_is_kept_when_it_covers_less() -> None:
         "/agent/intent",
         json={"intent": "one cheap item from every category from Watsons"},
     ).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert {line["merchant"] for line in body["lines"]} == {"Watsons"}
     assert [line["sku"] for line in body["lines"]] == ["SKU001", "SKU007", "SKU013", "SKU016", "SKU021"]
     assert body["quote"]["total_landed_cost"] == 259.8
-    assert body["payment"]["charged"] == 259.8
+    assert body["payment"] is None
+    assert body["settlement"]["total"] == 259.8
     assert "You asked for Watsons" in body["reply"]
     assert "does not stock" in body["reply"]
     assert_chain(body["audit_log"])
@@ -622,7 +696,7 @@ def test_week_of_food_guesses_several_ingredients() -> None:
         "/agent/intent",
         json={"intent": "buy food for 7 days with budget 700hkd"},
     ).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "READY"
     assert body["goal"]["model"] == "catalog"
     assert [(line["sku"], line["qty"]) for line in body["lines"]] == [
         ("SKU004", 1),
@@ -631,7 +705,8 @@ def test_week_of_food_guesses_several_ingredients() -> None:
     ]
     assert body["quote"]["total_landed_cost"] == 161.6
     assert body["quote"]["total_landed_cost"] <= 700
-    assert body["payment"]["charged"] == 161.6
+    assert body["payment"] is None
+    assert body["settlement"]["total"] == 161.6
     assert "7 days" in body["reply"]
     assert "700" in body["reply"]
     assert "rice, water, and potato chips" in body["reply"]
@@ -694,6 +769,150 @@ def test_team_contract_covers_both_readers() -> None:
     }
 
 
+def test_profile_cap_and_checkpoint_are_used() -> None:
+    class Memory:
+        def __init__(self):
+            self.checkpoints = []
+            self.chat = []
+
+        def get_profile(self, account_id):
+            return {
+                "id": account_id,
+                "monthly_cap": 50,
+                "per_order_cap": 500,
+                "bulk_ceiling": 800,
+                "monthly_spent": 0,
+                "default_payment_route": "visa",
+                "last_purchase": {"merchant": "Watsons", "amount": 12.0},
+                "recent_orders": [],
+            }
+
+        def open_order(self, account_id, intent):
+            return "ord_test"
+
+        def checkpoint(self, order_id, **fields):
+            self.checkpoints.append((order_id, fields.get("step"), fields.get("status")))
+
+        def append_chat(self, account_id, role, content, order_id=None):
+            self.chat.append((role, content))
+
+    memory = Memory()
+    policy = PolicyClient(offline=True)
+    agent = ShoppingAgent(FileMall(), policy, scripted, profile=memory)
+    body = agent.run("cheap toilet paper", 0, None, account_id="acct-1")
+    assert body["status"] == "HALTED"
+    assert body["policy"]["monthly_cap"] == 50
+    assert body["policy"]["reason"] == "Over HK$50 monthly cap"
+    assert body["payment"] is None
+    assert any(step == "audit_halt" and status == "halted" for _order, step, status in memory.checkpoints)
+    assert memory.chat[0][0] == "user"
+    assert "toilet" in memory.chat[0][1]
+
+
+def test_planner_shelf_caps_a_large_catalog() -> None:
+    catalog = [
+        {
+            "id": f"SKU{i:05d}",
+            "name": "soap" if i < 3 else f"item {i}",
+            "category": "Bath" if i < 50 else "Baby",
+            "merchant": "Watsons",
+            "price": 10 + i,
+            "currency": "HKD",
+            "sell_point": "rated",
+        }
+        for i in range(80)
+    ]
+    shelf = planner_shelf("soap", catalog)
+    assert len(shelf) <= 40
+    assert shelf
+    assert all("soap" in item["name"] for item in shelf)
+    small = catalog[:10]
+    assert planner_shelf("soap", small) is small
+    broad = planner_shelf("zzzz-not-a-product", catalog)
+    assert len(broad) == 2
+    assert {item["category"] for item in broad} == {"Bath", "Baby"}
+
+
+def test_payment_service_holds_a_draft_until_authorize() -> None:
+    class FakePayments:
+        def __init__(self) -> None:
+            self.authorized = []
+
+        def draft(self, **kwargs):
+            return {
+                "payment_id": "pay_hold",
+                "status": "DRAFT",
+                "amount": kwargs["amount"],
+                "currency": "HKD",
+                "rail": kwargs.get("rail") or "mastercard",
+                "merchant": kwargs["merchant"],
+                "risk_score": 5,
+                "step_up_required": False,
+                "step_up_reason": "",
+                "recommendation": {"rail": "mastercard", "rank": 1},
+            }
+
+        def authorize(self, payment_id, idempotency_key=None, step_up_confirmed=False):
+            self.authorized.append((payment_id, step_up_confirmed))
+            return {
+                "status": "CAPTURED",
+                "payment_id": payment_id,
+                "order_id": "ORD-held",
+                "charged": 59.3,
+                "currency": "HKD",
+                "rail": "mastercard",
+                "rail_ts": "2026-10-03T00:00:00Z",
+                "error": None,
+            }
+
+    payments = FakePayments()
+    api = TestClient(
+        create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), scripted, payments=payments))
+    )
+    review = api.post("/agent/intent", json={"intent": "cheap toilet paper"}).json()
+    assert review["status"] == "READY"
+    assert review["payment"] is None
+    assert review["payment_draft"] is None
+    assert events(review)[-1] == "BASKET_REVIEW"
+    assert payments.authorized == []
+    draft = api.post(
+        "/agent/basket/confirm",
+        json={"intent": "cheap toilet paper", "lines": [{"sku": "SKU001", "qty": 1}]},
+    ).json()
+    assert draft["status"] == "READY"
+    assert draft["payment"] is None
+    assert draft["payment_draft"]["payment_id"] == "pay_hold"
+    assert draft["payment_draft"]["rail"] == "mastercard"
+    assert draft["payment_draft"]["step_up_required"] is False
+
+    paid = api.post(
+        "/agent/payment/authorize",
+        json={"payment_id": "pay_hold", "step_up_confirmed": False},
+    ).json()
+    assert paid["success"] is True
+    assert paid["order_id"] == "ORD-held"
+    assert paid["charged"] == 59.3
+    assert payments.authorized == [("pay_hold", False)]
+
+
+def test_confirm_does_not_suggest_a_removed_item() -> None:
+    api, _policy = client()
+    body = api.post(
+        "/agent/basket/confirm",
+        json={
+            "intent": "cheap toilet paper",
+            "monthly_spent": 1990,
+            "lines": [{"sku": "SKU001", "qty": 1}],
+            "removed_skus": ["SKU002"],
+        },
+    ).json()
+    assert body["status"] == "NEEDS_INPUT"
+    assert body["question"].startswith("checked ")
+    assert "failed" in body["question"]
+    assert body["suggestion"]["sku"] not in {"SKU001", "SKU002"}
+    assert body["payment"] is None
+
+
 def test_home_page_does_not_dump_the_plan() -> None:
     api, _policy = client()
     page = api.get("/")
@@ -730,5 +949,6 @@ if __name__ == "__main__":
     test_vague_request_asks_a_follow_up()
     test_llm_react_is_shown_before_the_tool_steps()
     test_team_contract_covers_both_readers()
+    test_payment_service_holds_a_draft_until_authorize()
     test_home_page_does_not_dump_the_plan()
     print("ok")

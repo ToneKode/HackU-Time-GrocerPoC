@@ -18,6 +18,7 @@ export const router = createRouter({
     { path: '/returns', name: 'returns', component: () => import('./views/LegalView.vue'), meta: { doc: 'returns' } },
     { path: '/privacy', name: 'privacy', component: () => import('./views/LegalView.vue'), meta: { doc: 'privacy' } },
     { path: '/agent', name: 'agent', component: () => import('./views/AgentView.vue'), meta: { fullHeight: true } },
+    { path: '/profile', name: 'profile', component: () => import('./views/ProfileView.vue') },
   ],
   // Section links (#s-3) scroll below the sticky header; every other navigation starts at the top.
   scrollBehavior: (to) => (to.hash ? { el: to.hash, top: 80, behavior: 'smooth' } : { top: 0 }),

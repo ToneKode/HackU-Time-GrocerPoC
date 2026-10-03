@@ -1,4 +1,4 @@
-"""Hash-chained, append-only audit log backed by Postgres.
+"""Hash-chained, append-only audit log backed by MySQL.
 
 Same contract as backend-policy/audit_log.py (FR7 / NFR4):
   hash = sha256("index|ts|event|status|reason|prev_hash")
@@ -32,8 +32,8 @@ def _row_to_entry(row: dict) -> dict:
         "status": row["status"],
         "reason": row["reason"],
         "thought": row["thought"],
-        "prev_hash": row["prev_hash"],
-        "hash": row["hash"],
+        "prev_hash": str(row["prev_hash"]).strip(),
+        "hash": str(row["hash"]).strip(),
     }
 
 
@@ -48,15 +48,16 @@ class PostgresAuditLog:
         with self._lock:
             with connect(self.database_url) as conn:
                 with conn.cursor() as cur:
-                    # Serialize appends across processes with an advisory lock.
-                    cur.execute("SELECT pg_advisory_xact_lock(%s)", (872014,))
+                    cur.execute("SELECT GET_LOCK('tg_audit_append', 10) AS locked")
+                    if cur.fetchone()["locked"] != 1:
+                        raise RuntimeError("audit lock busy")
                     cur.execute(
                         "SELECT hash FROM audit_entries ORDER BY idx DESC LIMIT 1"
                     )
                     last = cur.fetchone()
-                    prev = last["hash"] if last else GENESIS
-                    cur.execute("SELECT COALESCE(MAX(idx) + 1, 0) AS next FROM audit_entries")
-                    index = int(cur.fetchone()["next"])
+                    prev = str(last["hash"]).strip() if last else GENESIS
+                    cur.execute("SELECT COALESCE(MAX(idx) + 1, 0) AS next_idx FROM audit_entries")
+                    index = int(cur.fetchone()["next_idx"])
                     e = {
                         "index": index,
                         "ts": now_ts(),
@@ -77,6 +78,7 @@ class PostgresAuditLog:
                         """,
                         e,
                     )
+                    cur.execute("SELECT RELEASE_LOCK('tg_audit_append')")
                 conn.commit()
             return e
 
@@ -123,7 +125,7 @@ class PostgresAuditLog:
             with connect(self.database_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE audit_entries SET reason = reason || ' (edited)' "
+                        "UPDATE audit_entries SET reason = CONCAT(reason, ' (edited)') "
                         "WHERE idx = %s",
                         (index,),
                     )

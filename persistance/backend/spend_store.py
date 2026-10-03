@@ -1,4 +1,4 @@
-"""Monthly spend tracked in Postgres.
+"""Monthly spend tracked in MySQL.
 
 Person 2's policy engine still accepts caller-supplied monthly_spent.
 When the agent (or UI) is wired to this store, GET /spend becomes the source of truth.
@@ -31,8 +31,8 @@ class SpendStore:
         with connect(self.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT account_id, year_month, spent, currency, updated_at "
-                    "FROM monthly_spend WHERE account_id = %s AND year_month = %s",
+                    "SELECT account_id, `year_month`, spent, currency, updated_at "
+                    "FROM monthly_spend WHERE account_id = %s AND `year_month` = %s",
                     (account_id, ym),
                 )
                 row = cur.fetchone()
@@ -46,9 +46,9 @@ class SpendStore:
             }
         return {
             "account_id": row["account_id"],
-            "year_month": row["year_month"],
+            "year_month": str(row["year_month"]).strip(),
             "spent": money(row["spent"]),
-            "currency": row["currency"],
+            "currency": str(row["currency"]).strip(),
             "updated_at": row["updated_at"].strftime("%Y-%m-%dT%H:%M:%SZ")
             if row["updated_at"]
             else None,
@@ -84,7 +84,7 @@ class SpendStore:
                 cur.execute(
                     """
                     INSERT INTO spend_ledger
-                        (account_id, year_month, amount, currency, payment_id,
+                        (account_id, `year_month`, amount, currency, payment_id,
                          idempotency_key, note)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
@@ -92,22 +92,26 @@ class SpendStore:
                 )
                 cur.execute(
                     """
-                    INSERT INTO monthly_spend (account_id, year_month, spent, currency)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (account_id, year_month) DO UPDATE
-                      SET spent = monthly_spend.spent + EXCLUDED.spent,
-                          updated_at = NOW()
-                    RETURNING account_id, year_month, spent, currency, updated_at
+                    INSERT INTO monthly_spend (account_id, `year_month`, spent, currency)
+                    VALUES (%s, %s, %s, %s) AS new_row
+                    ON DUPLICATE KEY UPDATE
+                      spent = monthly_spend.spent + new_row.spent,
+                      updated_at = CURRENT_TIMESTAMP(6)
                     """,
                     (account_id, ym, amt, currency),
+                )
+                cur.execute(
+                    "SELECT account_id, `year_month`, spent, currency, updated_at "
+                    "FROM monthly_spend WHERE account_id = %s AND `year_month` = %s",
+                    (account_id, ym),
                 )
                 row = cur.fetchone()
             conn.commit()
         return {
             "account_id": row["account_id"],
-            "year_month": row["year_month"],
+            "year_month": str(row["year_month"]).strip(),
             "spent": money(row["spent"]),
-            "currency": row["currency"],
+            "currency": str(row["currency"]).strip(),
             "updated_at": row["updated_at"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "added": amt,
             "duplicate": False,
@@ -124,6 +128,6 @@ class SpendStore:
                         "DELETE FROM monthly_spend WHERE account_id = %s", (account_id,)
                     )
                 else:
-                    cur.execute("TRUNCATE spend_ledger RESTART IDENTITY")
-                    cur.execute("TRUNCATE monthly_spend")
+                    cur.execute("TRUNCATE TABLE spend_ledger")
+                    cur.execute("TRUNCATE TABLE monthly_spend")
             conn.commit()

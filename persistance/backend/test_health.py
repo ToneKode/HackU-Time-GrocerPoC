@@ -1,9 +1,10 @@
 def test_health_reports_stores(c):
     body = c.get("/health").json()
     assert body["ok"] is True
-    assert body["postgres"] is True and body["redis"] is True
-    assert body["store"]["audit"] == "postgres"
-    assert body["store"]["spend"] == "postgres"
+    assert body["mysql"] is True and body["redis"] is True
+    assert body["store"]["audit"] == "mysql"
+    assert body["store"]["spend"] == "mysql"
+    assert body["store"]["catalog"] == "mysql"
     assert body["escalation_owner"] == "backend-policy:8001"
 
 

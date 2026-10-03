@@ -1,0 +1,20 @@
+[
+  {
+    "scenario_id": "cheap-toilet-paper-within-budget",
+    "intent": "Buy cheap toilet paper. My maximum delivered total is HK$150.",
+    "monthly_spent": 0,
+    "authorized_total": 150
+  },
+  {
+    "scenario_id": "quote-only-do-not-check-out",
+    "intent": "Compare cheap toilet paper. Show me the total; don't buy anything yet.",
+    "monthly_spent": 0,
+    "authorized_total": 150
+  },
+  {
+    "scenario_id": "monthly-cap-overrun",
+    "intent": "Buy cheap toilet paper.",
+    "monthly_spent": 1950,
+    "authorized_total": 150
+  }
+]
