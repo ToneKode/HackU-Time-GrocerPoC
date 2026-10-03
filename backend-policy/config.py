@@ -2,13 +2,18 @@
 
 Numbers, merchants and the check order mirror agent-brain/cross_team_config.json.
 test_policy.py::test_rules_match_cross_team_config fails if they drift apart.
+
+When DATABASE_URL / REDIS_URL are unset, we probe the persistance compose defaults
+and use them if reachable; otherwise we keep the zero-dep JSONL + fakeredis demo.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+log = logging.getLogger("policy.config")
 
 # Load backend-policy/.env if python-dotenv is installed. Real environment variables win.
 try:
@@ -38,27 +43,57 @@ REASONS = {
     "HALT_CATEGORY": "Category blacklisted",
 }
 
+# Defaults match persistance/compose.yaml
+PERSISTANCE_DATABASE_URL = "postgresql://tg:tg@127.0.0.1:5432/time_grocer"
+PERSISTANCE_REDIS_URL = "redis://127.0.0.1:6379/0"
+
 
 def env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _pg_reachable(url: str) -> bool:
+    try:
+        import psycopg
+        with psycopg.connect(url, connect_timeout=1) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _redis_reachable(url: str) -> bool:
+    try:
+        import redis
+        return bool(redis.Redis.from_url(url, socket_connect_timeout=1).ping())
+    except Exception:
+        return False
+
+
 def _ledger_path() -> str:
     path = env("LEDGER_PATH", "data/ledger.jsonl")
-    return path if os.path.isabs(path) else str(BASE_DIR / path)    # same file whatever the cwd is
+    return path if os.path.isabs(path) else str(BASE_DIR / path)
 
 
 def _redis_url() -> str:
-    # Default stays in-process fakeredis for a zero-dep demo.
-    # Point REDIS_URL at the persistance Redis (see persistance/compose.yaml) for real TTLs.
-    return env("REDIS_URL", "fakeredis://")
+    # Explicit REDIS_URL always wins (tests set fakeredis://).
+    if "REDIS_URL" in os.environ:
+        return os.environ["REDIS_URL"] or "fakeredis://"
+    if _redis_reachable(PERSISTANCE_REDIS_URL):
+        log.info("Auto-detected persistance Redis at %s", PERSISTANCE_REDIS_URL)
+        return PERSISTANCE_REDIS_URL
+    return "fakeredis://"
 
 
 def _database_url() -> str | None:
-    # When set, the hash-chained ledger lives in Postgres (persistance subtree).
-    # Empty / unset keeps the JSONL file at LEDGER_PATH.
-    url = env("DATABASE_URL", "").strip()
-    return url or None
+    if "DATABASE_URL" in os.environ:
+        url = os.environ["DATABASE_URL"].strip()
+        return url or None
+    if _pg_reachable(PERSISTANCE_DATABASE_URL):
+        log.info("Auto-detected persistance Postgres at %s", PERSISTANCE_DATABASE_URL.split("@")[-1])
+        return PERSISTANCE_DATABASE_URL
+    return None
 
 
 def settings() -> dict:

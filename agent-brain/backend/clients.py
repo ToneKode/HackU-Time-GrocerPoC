@@ -274,3 +274,62 @@ class PolicyClient:
             return None
         body = response.json()
         return body if isinstance(body, dict) else None
+
+
+class SpendClient:
+    """Monthly spend from persistance :8003. Falls back silently when offline."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8003",
+        http: httpx.Client | None = None,
+        account_id: str = "demo",
+        offline: bool = False,
+    ):
+        self.offline = offline
+        self.account_id = account_id
+        self.http = http or httpx.Client(base_url=base_url.rstrip("/"), timeout=0.5)
+
+    def get_monthly_spent(self, account_id: str | None = None) -> float | None:
+        account = account_id or self.account_id
+        body = self._request("GET", f"/spend/{account}", None)
+        if body is None or "spent" not in body:
+            return None
+        return float(body["spent"])
+
+    def record_payment(
+        self,
+        amount: float,
+        *,
+        account_id: str | None = None,
+        payment_id: str | None = None,
+        idempotency_key: str | None = None,
+        note: str = "",
+    ) -> dict | None:
+        if amount <= 0:
+            return None
+        return self._request(
+            "POST",
+            "/spend",
+            {
+                "account_id": account_id or self.account_id,
+                "amount": amount,
+                "currency": "HKD",
+                "payment_id": payment_id,
+                "idempotency_key": idempotency_key,
+                "note": note,
+            },
+        )
+
+    def _request(self, method: str, path: str, payload: dict | None) -> Any:
+        if self.offline:
+            return None
+        try:
+            response = self.http.request(method, path, json=payload)
+        except httpx.HTTPError:
+            self.offline = True
+            return None
+        if response.status_code >= 400:
+            return None
+        body = response.json()
+        return body if isinstance(body, dict) else None

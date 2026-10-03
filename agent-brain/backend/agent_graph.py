@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import operator
+import os
 import re
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict
@@ -51,6 +52,7 @@ THOUGHTS = {
 class AgentState(TypedDict, total=False):
     intent: str
     monthly_spent: float
+    account_id: str
     escalation_id: str
     escalation_status: str
     policy_status: str
@@ -248,9 +250,10 @@ def _failure(name: str, event: str, reason: str) -> dict:
 
 
 class ShoppingAgent:
-    def __init__(self, mall, policy: PolicyClient, planner=None):
+    def __init__(self, mall, policy: PolicyClient, planner=None, spend=None):
         self.mall = mall
         self.policy = policy
+        self.spend = spend
         self.planner = planner or OpenRouterPlanner()
         self.graph = self._build()
 
@@ -260,11 +263,29 @@ class ShoppingAgent:
             return products
         return self.mall.search("")
 
-    def run(self, intent: str, monthly_spent: float, escalation_id: str | None) -> dict:
+    def _resolve_monthly_spent(self, account_id: str, fallback: float) -> float:
+        """Postgres spend is source of truth when persistance :8003 is up."""
+        if self.spend is None:
+            return float(fallback or 0)
+        stored = self.spend.get_monthly_spent(account_id)
+        if stored is None:
+            return float(fallback or 0)
+        return float(stored)
+
+    def run(
+        self,
+        intent: str,
+        monthly_spent: float,
+        escalation_id: str | None,
+        account_id: str | None = None,
+    ) -> dict:
+        account = (account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        spent = self._resolve_monthly_spent(account, monthly_spent)
         result = self.graph.invoke(
             {
                 "intent": intent,
-                "monthly_spent": monthly_spent,
+                "monthly_spent": spent,
+                "account_id": account,
                 "escalation_id": escalation_id or "",
                 "path": [],
                 "audit_log": [],
@@ -675,6 +696,16 @@ class ShoppingAgent:
         plan_status = "COMPLETED" if payment["success"] else "FAILED"
         reason = "Payment success" if payment["success"] else (payment.get("error") or "Payment failed")
         log_status = "COMPLETED" if payment["success"] else "FAILED"
+        if payment.get("success") and self.spend is not None:
+            charged = float(payment.get("charged") if payment.get("charged") is not None else total)
+            order_id = payment.get("order_id") or f"{sku}:{qty}:{tag}:{escalation_id}"
+            self.spend.record_payment(
+                charged,
+                account_id=state.get("account_id") or "demo",
+                payment_id=payment.get("order_id"),
+                idempotency_key=str(order_id),
+                note=f"intent={state.get('intent') or ''}",
+            )
         return {
             "path": ["execute_payment"],
             "payment": payment,

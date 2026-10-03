@@ -10,15 +10,19 @@ py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8001
 pytest -q
 ```
 
-By default escalations use in-process fakeredis and the ledger is `data/ledger.jsonl`.
-For durable stores, start `persistance/` (Postgres + Redis) and export:
+By default, if `DATABASE_URL` / `REDIS_URL` are unset, this service probes the
+persistance compose defaults (`127.0.0.1:5432` / `:6379`) and uses them when
+reachable; otherwise it keeps JSONL + in-process fakeredis.
 
 ```bash
+cd persistance && ./start-stores.sh
+# optional explicit exports:
 export DATABASE_URL=postgresql://tg:tg@127.0.0.1:5432/time_grocer
 export REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-See `persistance/README.md`. Tests still force fakeredis + a temp JSONL file via `conftest.py`.
+See `persistance/README.md`. Escalation HTTP stays on this service (:8001).
+Tests still force fakeredis + a temp JSONL file via `conftest.py`.
 
 ## Endpoints
 | Method | Path | Who calls it | Notes |

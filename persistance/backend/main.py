@@ -1,13 +1,17 @@
-"""Persistance API — Postgres audit/spend + Redis escalation TTL. Port 8003.
+"""Persistance API — Postgres audit/spend + Redis health. Port 8003.
 
-Owns the durable stores. Policy (8001) can either:
-  1. Point DATABASE_URL / REDIS_URL at the same Postgres / Redis and keep serving
-     the contract endpoints itself, or
-  2. Call this service for ledger / spend / escalation state.
+Owns the durable stores. Person 2 (backend-policy :8001) owns the public contract
+for policy checks and escalation TTL decisions; this service exposes:
+
+  - health / demo reset
+  - hash-chained audit ledger (Postgres)
+  - monthly spend (Postgres) — agent reads before policy, writes after pay
+
+Escalation HTTP create/decide live only on :8001 so the agent has one owner.
+Redis keys are still shared when REDIS_URL points at the same instance.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -21,8 +25,7 @@ from pydantic import BaseModel, Field
 from audit_store import PostgresAuditLog, compute_hash
 from config import settings
 from db import apply_schema, ping as pg_ping
-from escalations import BadSignature, Escalations, NotFound, build_escalations
-from redis_client import flush_escalations, make_redis, ping as redis_ping
+from redis_client import flush_escalations, make_redis
 from spend_store import SpendStore
 
 log = logging.getLogger("persistance")
@@ -30,9 +33,7 @@ S = settings()
 
 audit = PostgresAuditLog(S["database_url"])
 spend = SpendStore(S["database_url"])
-escalations: Escalations = build_escalations(
-    S["redis_url"], audit, S["ttl"], S["signing_secret"]
-)
+redis_client = make_redis(S["redis_url"])
 USING_FAKEREDIS = S["redis_url"].startswith("fakeredis")
 
 
@@ -45,40 +46,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.error("Postgres unavailable: %s", exc)
     if USING_FAKEREDIS:
-        log.warning("REDIS_URL is fakeredis — escalations will not survive restarts")
+        log.warning("REDIS_URL is fakeredis — use persistance Redis for real TTLs")
     else:
         try:
-            escalations.r.ping()
-            log.info("Redis ready at %s", S["redis_url"])
+            redis_client.ping()
+            log.info("Redis ready at %s (escalation API is on policy :8001)", S["redis_url"])
         except redis.RedisError as exc:
             log.error("Redis unavailable at %s: %s", S["redis_url"], exc)
-
-    async def sweeper():
-        failing = False
-        while True:
-            try:
-                await asyncio.to_thread(escalations.sweep)
-                if failing:
-                    log.info("sweeper: recovered")
-                    failing = False
-            except Exception as exc:
-                if not failing:
-                    log.error(
-                        "sweeper: %s: %s. Retrying every second.",
-                        type(exc).__name__,
-                        exc,
-                    )
-                    failing = True
-            await asyncio.sleep(1)
-
-    task = asyncio.create_task(sweeper())
     yield
-    task.cancel()
 
 
 app = FastAPI(
     title="HacKU Time-Grocer Persistance API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 _origins = list(
@@ -106,26 +86,11 @@ async def redis_unavailable(_request, exc: redis.RedisError) -> JSONResponse:
     )
 
 
-# ------------------------------------------------------------------ models
 class LogEventIn(BaseModel):
     event: str = Field(min_length=1)
     status: str = Field(min_length=1)
     reason: str = ""
     thought: str = ""
-
-
-class CreateEscalationIn(BaseModel):
-    amount: float = Field(gt=0)
-    currency: Literal["HKD"] = "HKD"
-    merchant: str
-    sku: str
-    qty: int = Field(default=1, ge=1)
-    reason: str
-
-
-class DecisionIn(BaseModel):
-    decision: Literal["APPROVE", "REFUSE"]
-    signature: str | None = None
 
 
 class SpendRecordIn(BaseModel):
@@ -138,7 +103,6 @@ class SpendRecordIn(BaseModel):
     note: str = ""
 
 
-# ------------------------------------------------------------------ routes
 @app.get("/health")
 def health() -> dict:
     postgres_ok = False
@@ -148,7 +112,7 @@ def health() -> dict:
     except Exception:
         postgres_ok = False
     try:
-        redis_ok = bool(escalations.r.ping())
+        redis_ok = bool(redis_client.ping())
     except redis.RedisError:
         redis_ok = False
     return {
@@ -158,9 +122,10 @@ def health() -> dict:
         "audit_entries": len(audit.entries()) if postgres_ok else None,
         "store": {
             "audit": "postgres",
-            "escalations": "fakeredis" if USING_FAKEREDIS else "redis",
+            "escalations": "policy:8001+redis",
             "spend": "postgres",
         },
+        "escalation_owner": "backend-policy:8001",
     }
 
 
@@ -177,34 +142,6 @@ def get_audit_log() -> list[dict]:
 @app.get("/audit_log/verify")
 def verify_audit_log() -> dict:
     return audit.verify()
-
-
-@app.post("/create_escalation")
-def create_escalation(body: CreateEscalationIn) -> dict:
-    # Store-only: no policy re-check here. Policy owns the ESCALATE guard.
-    return escalations.create(
-        body.amount, body.currency, body.merchant, body.sku, body.qty, body.reason
-    )
-
-
-@app.get("/escalations/{escalation_id}")
-def get_escalation(escalation_id: str) -> dict:
-    try:
-        return escalations.get(escalation_id)
-    except NotFound:
-        raise HTTPException(404, f"Unknown escalation: {escalation_id}")
-
-
-@app.post("/escalations/{escalation_id}/decision")
-def decide_escalation(escalation_id: str, body: DecisionIn) -> dict:
-    try:
-        return escalations.decide(
-            escalation_id, body.decision, body.signature, S["require_signature"]
-        )
-    except NotFound:
-        raise HTTPException(404, f"Unknown escalation: {escalation_id}")
-    except BadSignature:
-        raise HTTPException(403, "Invalid approval signature")
 
 
 @app.get("/spend/{account_id}")
@@ -247,13 +184,12 @@ def demo_reset() -> dict:
         raise HTTPException(404)
     audit.reset()
     spend.reset()
-    removed = flush_escalations(escalations.r)
+    removed = flush_escalations(redis_client)
     return {"reset": True, "escalation_keys_removed": removed}
 
 
 @app.get("/_meta/hash_fields")
 def hash_fields() -> dict:
-    # Handy for cross-checking the contract without importing audit_store.
     sample = {
         "index": 0,
         "ts": "2026-10-03T12:00:00Z",
@@ -263,8 +199,14 @@ def hash_fields() -> dict:
         "prev_hash": "0" * 64,
     }
     return {
-        "hash_fields_in_order": list(
-            ("index", "ts", "event", "status", "reason", "prev_hash")
-        ),
+        "hash_fields_in_order": [
+            "index",
+            "ts",
+            "event",
+            "status",
+            "reason",
+            "prev_hash",
+        ],
         "contract_example_hash": compute_hash(sample),
+        "escalation_owner": "backend-policy:8001",
     }
