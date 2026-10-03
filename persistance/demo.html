@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Persistance PoC demo</title>
+<style>
+ body{font-family:ui-sans-serif,system-ui;margin:2rem;background:#0f172a;color:#e2e8f0}
+ h1{font-size:1.4rem} pre{background:#1e293b;padding:1rem;border-radius:8px;overflow:auto;min-height:12rem}
+ button{background:#38bdf8;color:#0f172a;border:0;padding:.6rem 1rem;border-radius:6px;font-weight:700;cursor:pointer}
+ button:disabled{opacity:.5;cursor:wait}
+ .label{opacity:.7;font-size:.85rem}
+</style></head><body>
+<h1>Time-Grocer persistance check</h1>
+<p class="label">Postgres spend + policy on redis/postgres · ports 8001–8003</p>
+<button id="run">Run buy flow</button>
+<pre id="out">Ready.</pre>
+<script>
+const out = document.getElementById('out');
+const btn = document.getElementById('run');
+const log = (x) => { out.textContent = typeof x === 'string' ? x : JSON.stringify(x, null, 2); };
+async function j(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(url + ' → ' + res.status);
+  return res.json();
+}
+btn.onclick = async () => {
+  btn.disabled = true;
+  try {
+    log('Resetting spend…');
+    await j('http://127.0.0.1:8003/demo/reset', {method:'POST'});
+    const before = await j('http://127.0.0.1:8003/spend/demo');
+    log('Buying cheap toilet paper…');
+    const buy1 = await j('http://127.0.0.1:8002/agent/intent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({intent:'cheap toilet paper',account_id:'demo'})});
+    const mid = await j('http://127.0.0.1:8003/spend/demo');
+    log('Buying cheap rice (monthly_spent body=0; store should win)…');
+    const buy2 = await j('http://127.0.0.1:8002/agent/intent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({intent:'cheap rice',account_id:'demo',monthly_spent:0})});
+    const after = await j('http://127.0.0.1:8003/spend/demo');
+    const health = await j('http://127.0.0.1:8001/health');
+    log({
+      before_spent: before.spent,
+      buy1: {status: buy1.status, charged: buy1.payment && buy1.payment.charged, monthly_spent: buy1.policy && buy1.policy.monthly_spent},
+      mid_spent: mid.spent,
+      buy2: {status: buy2.status, charged: buy2.payment && buy2.payment.charged, monthly_spent: buy2.policy && buy2.policy.monthly_spent},
+      after_spent: after.spent,
+      policy_store: health.store
+    });
+  } catch (e) {
+    log('ERROR: ' + e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+</script></body></html>
