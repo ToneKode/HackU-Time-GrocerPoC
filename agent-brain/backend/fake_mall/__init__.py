@@ -14,6 +14,22 @@ def money(value: float) -> float:
     return round(float(value), 2)
 
 
+# Same PoC cashback as payment/backend/recommender.py and the mock mall.
+RAIL_CASHBACK = {"mastercard": 0.01, "unionpay": 0.015}
+
+
+def route_discount(landed: float, payment_route: str | None) -> tuple[float, float, str]:
+    landed = money(landed)
+    route = (payment_route or "").strip()
+    rate = RAIL_CASHBACK.get(route.casefold(), 0.0)
+    if not route or rate <= 0:
+        reason = "" if not route else f"No cashback for route {route}."
+        return 0.0, landed, reason
+    discount = money(landed * rate)
+    reduced = money(landed - discount)
+    return discount, reduced, f"{route} cashback {rate * 100:.1f}% (HK${discount:.2f})."
+
+
 class FileMall:
     def __init__(self, folder: Path = ROOT):
         self.products = json.loads((folder / "products.json").read_text(encoding="utf-8"))
@@ -41,10 +57,10 @@ class FileMall:
         except KeyError as exc:
             raise LookupError(f"Unknown SKU: {sku}") from exc
 
-    def cart(self, sku: str, qty: int) -> dict:
-        return self.cart_lines([{"sku": sku, "qty": qty}])
+    def cart(self, sku: str, qty: int, payment_route: str | None = None) -> dict:
+        return self.cart_lines([{"sku": sku, "qty": qty}], payment_route=payment_route)
 
-    def cart_lines(self, items: list[dict]) -> dict:
+    def cart_lines(self, items: list[dict], payment_route: str | None = None) -> dict:
         line_items = []
         for item in items:
             product = self.product(item["sku"])
@@ -68,14 +84,20 @@ class FileMall:
             else money(self.rules["shipping_fee_below_threshold"])
         )
         tax = money(self.rules["tax"])
+        before = money(subtotal + shipping_fee + tax)
+        discount, reduced, reason = route_discount(before, payment_route)
         return {
             "line_items": line_items,
             "subtotal": subtotal,
             "shipping_fee": shipping_fee,
             "tax": tax,
-            "total_landed_cost": money(subtotal + shipping_fee + tax),
+            "total_landed_cost": reduced,
             "currency": self.rules["currency"],
             "free_shipping_threshold": self.rules["free_shipping_threshold"],
+            "payment_route": payment_route,
+            "discount": discount,
+            "discount_reason": reason,
+            "total_before_discount": before,
         }
 
     def pay(self, cart_total: float, idempotency_key: str, payment_route: str = "mastercard") -> dict:

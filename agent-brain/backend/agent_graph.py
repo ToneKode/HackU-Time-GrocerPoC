@@ -62,6 +62,7 @@ class AgentState(TypedDict, total=False):
     policy: dict
     escalation: dict
     payment: dict
+    payment_draft: dict
     needs: list
     lines: list
     repairs: list
@@ -301,6 +302,7 @@ class ShoppingAgent:
             "policy": result.get("policy"),
             "escalation": public_escalation(result["escalation"]) if result.get("escalation") else None,
             "payment": result.get("payment"),
+            "payment_draft": result.get("payment_draft"),
             "lines": result.get("lines") or [],
             "repairs": result.get("repairs") or [],
             "payment_route": result.get("payment_route") or "",
@@ -692,20 +694,45 @@ class ShoppingAgent:
         try:
             route = state.get("payment_route") or "mastercard"
             key = f"{sku}:{qty}:{tag}:{escalation_id}"
+            merchant = str(product.get("merchant") or (state.get("escalation") or {}).get("merchant") or "unknown")
+            amount, discount, before = self._amount_for_route(state, route, float(total))
             payment = None
             if self.payments is not None:
-                payment = self.payments.charge(
-                    amount=float(total),
-                    merchant=str(product.get("merchant") or (state.get("escalation") or {}).get("merchant") or "unknown"),
+                draft = self.payments.draft(
+                    amount=amount,
+                    merchant=merchant,
                     account_id=state.get("account_id") or "demo",
                     intent=str(state.get("intent") or ""),
                     sku=str(sku or ""),
                     qty=int(qty),
                     rail=route,
-                    idempotency_key=key,
                 )
-            if payment is None:
-                payment = self.mall.pay(float(total), key, route)
+                if draft and draft.get("payment_id"):
+                    return {
+                        "path": ["execute_payment"],
+                        "plan_status": "READY",
+                        "payment": None,
+                        "payment_draft": {
+                            "payment_id": draft["payment_id"],
+                            "status": draft.get("status") or "DRAFT",
+                            "amount": float(draft.get("amount") if draft.get("amount") is not None else amount),
+                            "currency": draft.get("currency") or "HKD",
+                            "rail": draft.get("rail") or route,
+                            "merchant": draft.get("merchant") or merchant,
+                            "risk_score": int(draft.get("risk_score") or 0),
+                            "step_up_required": bool(draft.get("step_up_required")),
+                            "step_up_reason": draft.get("step_up_reason") or "",
+                            "recommendation": draft.get("recommendation"),
+                        },
+                        "pending_event": _pending(
+                            "PAYMENT",
+                            "DRAFT",
+                            "Draft held until the shopper authorizes.",
+                        ),
+                    }
+            payment = self.mall.pay(amount, key, route)
+            payment["discount"] = discount
+            payment["total_before_discount"] = before
         except Exception:
             return _failure("execute_payment", "PAYMENT", "Mall payment failed")
         plan_status = "COMPLETED" if payment["success"] else "FAILED"
@@ -727,6 +754,78 @@ class ShoppingAgent:
             "plan_status": plan_status,
             "pending_event": _pending("PAYMENT", log_status, reason),
         }
+
+    def _amount_for_route(self, state: AgentState, route: str, fallback: float) -> tuple[float, float, float]:
+        """Re-price with the chosen rail so the charge uses the mall discount."""
+        try:
+            lines = state.get("lines") or []
+            if lines:
+                quoted = self.mall.cart_lines(
+                    [{"sku": line["sku"], "qty": line["qty"]} for line in lines],
+                    payment_route=route,
+                )
+            else:
+                product = state.get("product") or {}
+                sku = product.get("id") or (state.get("escalation") or {}).get("sku")
+                qty = int((state.get("goal") or {}).get("qty") or 1)
+                if not sku:
+                    return fallback, 0.0, fallback
+                quoted = self.mall.cart(sku, qty, payment_route=route)
+        except Exception:
+            return fallback, 0.0, fallback
+        if not isinstance(quoted, dict) or "discount" not in quoted:
+            return fallback, 0.0, fallback
+        reduced = round(float(quoted["total_landed_cost"]), 2)
+        discount = round(float(quoted.get("discount") or 0), 2)
+        before = round(float(quoted.get("total_before_discount") or fallback), 2)
+        return reduced, discount, before
+
+    def authorize_draft(self, payment_id: str, step_up_confirmed: bool = False, account_id: str = "demo") -> dict:
+        if self.payments is None:
+            return {
+                "success": False,
+                "order_id": None,
+                "charged": None,
+                "currency": None,
+                "payment_route": None,
+                "ts": None,
+                "error": "payment_offline",
+                "payment_id": payment_id,
+            }
+        result = self.payments.authorize(payment_id, step_up_confirmed=step_up_confirmed)
+        if not result:
+            return {
+                "success": False,
+                "order_id": None,
+                "charged": None,
+                "currency": None,
+                "payment_route": None,
+                "ts": None,
+                "error": "authorize_failed",
+                "payment_id": payment_id,
+            }
+        ok = result.get("status") == "CAPTURED"
+        shaped = {
+            "success": ok,
+            "order_id": result.get("order_id"),
+            "charged": result.get("charged") if ok else None,
+            "currency": result.get("currency") or "HKD",
+            "payment_route": result.get("rail"),
+            "ts": result.get("rail_ts") or result.get("updated_at"),
+            "error": None if ok else (result.get("error") or result.get("detail") or "authorize_failed"),
+            "payment_id": result.get("payment_id") or payment_id,
+            "discount": None,
+            "total_before_discount": None,
+        }
+        if ok and self.spend is not None and shaped["charged"] is not None:
+            self.spend.record_payment(
+                float(shaped["charged"]),
+                account_id=account_id,
+                payment_id=shaped.get("order_id") or payment_id,
+                idempotency_key=str(shaped.get("order_id") or payment_id),
+                note="authorize_draft",
+            )
+        return shaped
 
     def _escalate(self, state: AgentState) -> dict:
         product = state["product"]

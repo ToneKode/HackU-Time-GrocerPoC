@@ -89,13 +89,18 @@ class MallClient:
         response.raise_for_status()
         return response.json()
 
-    def cart(self, sku: str, qty: int) -> dict:
-        return self.cart_lines([{"sku": sku, "qty": qty}])
+    def cart(self, sku: str, qty: int, payment_route: str | None = None) -> dict:
+        return self.cart_lines([{"sku": sku, "qty": qty}], payment_route=payment_route)
 
-    def cart_lines(self, items: list[dict]) -> dict:
+    def cart_lines(self, items: list[dict], payment_route: str | None = None) -> dict:
+        payload: dict[str, Any] = {
+            "items": [{"sku": item["sku"], "qty": int(item["qty"])} for item in items],
+        }
+        if payment_route:
+            payload["payment_route"] = payment_route
         response = self.http.post(
             "/cart",
-            json={"items": [{"sku": item["sku"], "qty": int(item["qty"])} for item in items]},
+            json=payload,
         )
         response.raise_for_status()
         return response.json()
@@ -373,11 +378,20 @@ class PaymentClient:
             },
         )
 
-    def authorize(self, payment_id: str, idempotency_key: str | None = None) -> dict | None:
+    def authorize(
+        self,
+        payment_id: str,
+        idempotency_key: str | None = None,
+        step_up_confirmed: bool = False,
+    ) -> dict | None:
         return self._request(
             "POST",
             "/payment/authorize",
-            {"payment_id": payment_id, "idempotency_key": idempotency_key},
+            {
+                "payment_id": payment_id,
+                "idempotency_key": idempotency_key,
+                "step_up_confirmed": step_up_confirmed,
+            },
         )
 
     def charge(

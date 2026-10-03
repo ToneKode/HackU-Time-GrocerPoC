@@ -29,7 +29,7 @@
     },
     "still_needed": [
       "Add sell_point to the product model and return it from GET /products and GET /products/{sku}.",
-      "Accept payment_route on POST /cart and return discount plus the reduced total_landed_cost. Until then person 1 does not subtract a promo from the amount it sends to POST /pay."
+      "POST /cart accepts payment_route and returns discount, discount_reason, total_before_discount, and a reduced total_landed_cost. Mastercard is 1 percent. UnionPay is 1.5 percent."
     ]
   },
   "person_3": {
@@ -58,7 +58,7 @@
     "lines": "Chosen products. Empty on a one-product run.",
     "repairs": "Swaps already made so the basket could fit.",
     "payment_route": "The route person 1 chose. Person 4 echoes it on POST /pay.",
-    "payment_reason": "Why that route. Estimated promo savings are not subtracted from quote.total_landed_cost.",
+    "payment_reason": "Why that route. quote.total_landed_cost is the figure policy judged, before rail cashback. payment.charged is that figure minus the mall discount.",
     "question": "Empty unless status is NEEDS_INPUT.",
     "reply": "What the shopper should read. When some categories are blacklisted, this says so. lines, quote, and payment are only the items that can still be paid.",
     "react": "ReAct trace in order. Each step has thought, action, observation, and source. source llm is the model. source agent is a tool step. source catalog means code built the needs without the model.",
@@ -76,7 +76,7 @@
         "merchants": ["Watsons", "Japan Home Centre"],
         "total_landed_cost": 79.8,
         "policy": "PASS",
-        "payment": 79.8
+        "payment": 79.0
       }
     },
     {
@@ -154,7 +154,7 @@
       "Keep several merchants in one POST /cart. Shipping stays one fee on the combined subtotal unless you change it; if you do, total_landed_cost is still the only number person 1 will check and pay.",
       "POST /pay charges cart_total on the payment_route person 1 sends. You do not pick the card. You receive nothing from person 2.",
       "Add sell_point to Product and return it.",
-      "Next step, not required for the current agent: POST /cart takes payment_route and returns the discount and the reduced total. Person 1 will keep charging the unreduced total until that exists.",
+      "POST /cart takes payment_route and returns the discount and the reduced total. Person 1 charges that reduced total.",
       "One request, one charge. Split tender is outside this contract."
     ]
   }

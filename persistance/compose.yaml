@@ -1,5 +1,5 @@
 # HacKU Time-Grocer — durable stores
-# Postgres: hash-chained audit ledger + monthly spend
+# Postgres: hash-chained audit ledger + monthly spend + payment records
 # Redis: escalation TTL clock (esc:live / esc:meta / esc:decision)
 #
 #   cd persistance && docker compose up -d

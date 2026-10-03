@@ -32,7 +32,7 @@ Covers health, product filters, cart shipping/TLC rules, payment success/decline
 | GET | `/products` | List/filter products (`q`, `merchant`, `category`) |
 | GET | `/products/{sku}` | Single product (404 if missing) |
 | GET | `/merchants` | Whitelist / blacklist |
-| POST | `/cart` | Price cart (shipping, TLC) |
+| POST | `/cart` | Price cart. Optional `payment_route` applies Mastercard 1% or UnionPay 1.5% cashback |
 | POST | `/pay` | Simulate payment + rewards (~500ms) |
 
 ### Example curls

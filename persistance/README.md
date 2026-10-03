@@ -1,6 +1,8 @@
 # persistance — durable stores for HacKU Time-Grocer · port 8003
 
-Postgres holds the hash-chained audit ledger and monthly spend.
+Postgres holds the hash-chained audit ledger, monthly spend, and payment
+records (`payments`, `payment_jti`). The payment service on :8004 writes those
+rows; this API does not.
 Redis holds escalation TTL keys; **Person 2 (`backend-policy` :8001) owns
 create/decide HTTP**. This API exposes health, audit, and spend only.
 

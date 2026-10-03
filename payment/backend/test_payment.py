@@ -1,6 +1,15 @@
+def test_memory_store_when_database_url_empty():
+    from store import PaymentStore, open_store
+
+    store = open_store("", "")
+    assert isinstance(store, PaymentStore)
+    assert store.backend == "memory"
+
+
 def test_health(c):
     body = c.get("/health").json()
     assert body["ok"] is True and body["service"] == "payment"
+    assert body["store"] == "memory"
     assert "mastercard" in body["rails"]
 
 
@@ -51,7 +60,10 @@ def test_decline_666(c):
         "/payment/draft",
         json={"amount": 666.0, "merchant": "Watsons", "sku": "X", "rail": "unionpay"},
     ).json()
-    auth = c.post("/payment/authorize", json={"payment_id": draft["payment_id"]}).json()
+    auth = c.post(
+        "/payment/authorize",
+        json={"payment_id": draft["payment_id"], "step_up_confirmed": True},
+    ).json()
     assert auth["status"] == "FAILED" and auth["error"] == "card_declined"
 
 
@@ -65,6 +77,92 @@ def test_refund(c):
         f"/payment/{draft['payment_id']}/refund", json={"reason": "changed_mind"}
     ).json()
     assert ref["status"] == "REFUNDED" and "refunded" in ref["evidence"]
+
+
+def test_step_up_blocks_until_confirmed(c):
+    draft = c.post(
+        "/payment/draft",
+        json={"amount": 420.0, "merchant": "Watsons", "sku": "SKU001", "rail": "unionpay"},
+    ).json()
+    assert draft["step_up_required"] is True
+    assert draft["risk_score"] >= 50
+    blocked = c.post("/payment/authorize", json={"payment_id": draft["payment_id"]})
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "step_up_required"
+    auth = c.post(
+        "/payment/authorize",
+        json={"payment_id": draft["payment_id"], "step_up_confirmed": True},
+    ).json()
+    assert auth["status"] == "CAPTURED"
+    assert "step_up_confirmed" in auth["evidence"]
+
+
+def test_small_payment_does_not_step_up(c):
+    draft = c.post(
+        "/payment/draft",
+        json={"amount": 59.9, "merchant": "Watsons", "sku": "SKU001", "rail": "mastercard"},
+    ).json()
+    assert draft["step_up_required"] is False
+    assert draft["risk_score"] < 50
+
+
+def test_evidence_pack_omits_token(c):
+    draft = c.post(
+        "/payment/draft",
+        json={"amount": 72.0, "merchant": "HKTVmall", "sku": "SKU004", "rail": "mastercard"},
+    ).json()
+    c.post("/payment/authorize", json={"payment_id": draft["payment_id"]})
+    c.post(f"/payment/{draft['payment_id']}/refund", json={"reason": "not_received"})
+    pack = c.get(f"/payment/{draft['payment_id']}/evidence").json()
+    assert pack["pack_id"] == "ev_" + draft["payment_id"]
+    assert pack["status"] == "REFUNDED"
+    assert pack["refund_reason"] == "not_received"
+    assert "refunded" in pack["evidence"]
+    assert "token" not in pack
+    assert pack["merchant"] == "HKTVmall"
+
+
+def test_remote_acquirer_is_posted(c, monkeypatch):
+    import json
+
+    import httpx
+
+    from rails import charge_remote
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.url.path == "/pay"
+        assert body["payment_route"] == "unionpay"
+        assert body["cart_total"] == 40.0
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "order_id": "ORD-mall01",
+                "charged": body["cart_total"],
+                "currency": "HKD",
+                "payment_route": body["payment_route"],
+                "reward_points_earned": 4,
+                "ts": "2026-10-03T00:00:00Z",
+                "error": None,
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://mall")
+    remote = charge_remote("http://mall", 40, "unionpay", "idem-1", client=client)
+    assert remote["success"] is True
+    assert remote["order_id"] == "ORD-mall01"
+    assert remote["auth_id"] == "AUTH-ORD-mall01"
+
+    monkeypatch.setitem(__import__("main").S, "mock_acquirer_url", "http://mall")
+    monkeypatch.setattr("rails.charge_remote", lambda *args, **kwargs: remote)
+    draft = c.post(
+        "/payment/draft",
+        json={"amount": 40.0, "merchant": "Watsons", "sku": "S", "rail": "mastercard"},
+    ).json()
+    auth = c.post("/payment/authorize", json={"payment_id": draft["payment_id"]}).json()
+    assert auth["status"] == "CAPTURED"
+    assert auth["order_id"] == "ORD-mall01"
 
 
 def test_token_is_one_time(c):

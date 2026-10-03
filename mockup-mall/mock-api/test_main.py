@@ -147,6 +147,30 @@ def test_cart_above_threshold_free_shipping(client: TestClient) -> None:
     assert body["total_landed_cost"] == 449.5
 
 
+def test_cart_payment_route_reduces_total(client: TestClient) -> None:
+    plain = client.post("/cart", json={"items": [{"sku": "SKU001", "qty": 1}]}).json()
+    routed = client.post(
+        "/cart",
+        json={"items": [{"sku": "SKU001", "qty": 1}], "payment_route": "unionpay"},
+    ).json()
+    assert plain["discount"] == 0.0
+    assert plain["total_landed_cost"] == plain["total_before_discount"]
+    assert routed["total_before_discount"] == plain["total_landed_cost"]
+    assert routed["discount"] == round(plain["total_landed_cost"] * 0.015, 2)
+    assert routed["total_landed_cost"] == round(plain["total_landed_cost"] - routed["discount"], 2)
+    assert routed["payment_route"] == "unionpay"
+    assert "UnionPay" in routed["discount_reason"] or "unionpay" in routed["discount_reason"]
+
+
+def test_cart_unknown_route_has_no_discount(client: TestClient) -> None:
+    body = client.post(
+        "/cart",
+        json={"items": [{"sku": "SKU001", "qty": 1}], "payment_route": "octopus"},
+    ).json()
+    assert body["discount"] == 0.0
+    assert body["total_landed_cost"] == body["total_before_discount"]
+
+
 def test_cart_unknown_sku_404(client: TestClient) -> None:
     response = client.post("/cart", json={"items": [{"sku": "MISSING", "qty": 1}]})
     assert response.status_code == 404

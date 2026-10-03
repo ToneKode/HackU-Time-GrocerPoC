@@ -1,6 +1,7 @@
 -- HacKU Time-Grocer persistence schema
--- Postgres owns the append-only audit ledger and monthly spend.
+-- Postgres owns the append-only audit ledger, monthly spend, and payment records.
 -- Redis (separate process) owns escalation TTL keys — see redis_client.py.
+-- Payment rows are written by payment/ (:8004), not by the :8003 API.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id          TEXT PRIMARY KEY,
@@ -51,5 +52,50 @@ CREATE TABLE IF NOT EXISTS spend_ledger (
 CREATE INDEX IF NOT EXISTS spend_ledger_account_ym_idx
     ON spend_ledger (account_id, year_month);
 
+-- Payment control loop (Topic 4). Owned by payment/ :8004.
+-- The JWT is kept server-side so authorize can run without the client echoing it.
+-- PAN / CVV are never stored.
+CREATE TABLE IF NOT EXISTS payments (
+    payment_id        TEXT PRIMARY KEY,
+    status            TEXT NOT NULL,
+    account_id        TEXT NOT NULL,
+    amount            NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    currency          CHAR(3) NOT NULL DEFAULT 'HKD',
+    merchant          TEXT NOT NULL,
+    rail              TEXT NOT NULL,
+    purpose           TEXT NOT NULL DEFAULT '',
+    intent            TEXT NOT NULL DEFAULT '',
+    cart_hash         TEXT NOT NULL DEFAULT '',
+    token_jti         TEXT NOT NULL,
+    token             TEXT NOT NULL,
+    token_expires_at  BIGINT NOT NULL,
+    recommendation    JSONB,
+    auth_id           TEXT,
+    order_id          TEXT,
+    receipt_id        TEXT,
+    error             TEXT,
+    evidence          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    extra             JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    CONSTRAINT payments_status_chk CHECK (
+        status IN ('DRAFT', 'AUTHORIZED', 'CAPTURED', 'FAILED', 'REFUNDED')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS payments_account_created_idx
+    ON payments (account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS payments_token_jti_idx ON payments (token_jti);
+
+-- One-time token use. Survives process restart (memory store does not).
+CREATE TABLE IF NOT EXISTS payment_jti (
+    jti         TEXT PRIMARY KEY,
+    payment_id  TEXT,
+    used_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 INSERT INTO schema_migrations (id) VALUES ('001_initial')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO schema_migrations (id) VALUES ('002_payments')
 ON CONFLICT (id) DO NOTHING;

@@ -14,17 +14,22 @@ from pydantic import BaseModel, Field
 from config import settings
 from rails import charge
 from recommender import pick_rail, recommend
-from store import PaymentStore, draft_record
+from risk import assess
+from store import draft_record, open_store
 from tokens import mint, verify
 
 log = logging.getLogger("payment")
 S = settings()
-store = PaymentStore(S["redis_url"])
+store = open_store(S["database_url"], S["redis_url"])
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("Payment API ready (acquirer=%s)", S["mock_acquirer_url"] or "local-mock")
+    log.info(
+        "Payment API ready (store=%s acquirer=%s)",
+        store.backend,
+        S["mock_acquirer_url"] or "local-mock",
+    )
     yield
 
 
@@ -67,6 +72,7 @@ class AuthorizeIn(BaseModel):
     payment_id: str
     token: str | None = None
     idempotency_key: str | None = None
+    step_up_confirmed: bool = False
 
 
 class RefundIn(BaseModel):
@@ -83,6 +89,7 @@ def health() -> dict:
     return {
         "ok": True,
         "service": "payment",
+        "store": store.backend,
         "acquirer": S["mock_acquirer_url"] or "local-mock",
         "rails": ["mastercard", "unionpay"],
     }
@@ -129,6 +136,7 @@ def payment_draft(body: DraftIn) -> dict:
         token=token,
         recommendation=choice,
     )
+    record.update(assess(body.amount, rail, choice.get("rail")))
     store.put(record)
     return _public(record)
 
@@ -162,6 +170,9 @@ def payment_authorize(body: AuthorizeIn) -> dict:
     if claims.get("aud") != record["merchant"]:
         raise HTTPException(403, "Token merchant mismatch")
 
+    if record.get("step_up_required") and not body.step_up_confirmed:
+        raise HTTPException(403, "step_up_required")
+
     if not store.mark_jti_used(claims["jti"]):
         # Idempotent replay of same token after success is handled above;
         # a second charge attempt with a burned jti is rejected.
@@ -177,6 +188,8 @@ def payment_authorize(body: AuthorizeIn) -> dict:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     record["updated_at"] = now
     evidence = list(record.get("evidence") or [])
+    if body.step_up_confirmed and "step_up_confirmed" not in evidence:
+        evidence.append("step_up_confirmed")
     if "authorized" not in evidence:
         evidence.append("authorized")
     if not result.get("success"):
@@ -233,6 +246,41 @@ def payment_refund(payment_id: str, body: RefundIn) -> dict:
     record["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     store.put(record)
     return _public(record)
+
+
+@app.get("/payment/{payment_id}/evidence")
+def payment_evidence(payment_id: str) -> dict:
+    record = store.get(payment_id)
+    if record is None:
+        raise HTTPException(404, f"Unknown payment: {payment_id}")
+    public = _public(record)
+    return {
+        "pack_id": "ev_" + payment_id,
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "payment_id": public["payment_id"],
+        "status": public["status"],
+        "account_id": public.get("account_id"),
+        "amount": public.get("amount"),
+        "currency": public.get("currency"),
+        "merchant": public.get("merchant"),
+        "rail": public.get("rail"),
+        "purpose": public.get("purpose"),
+        "intent": public.get("intent"),
+        "cart_hash": public.get("cart_hash"),
+        "risk_score": public.get("risk_score"),
+        "step_up_required": public.get("step_up_required"),
+        "step_up_reason": public.get("step_up_reason") or "",
+        "risk_factors": public.get("risk_factors") or [],
+        "recommendation": public.get("recommendation"),
+        "auth_id": public.get("auth_id"),
+        "order_id": public.get("order_id"),
+        "receipt_id": public.get("receipt_id"),
+        "refund_reason": public.get("refund_reason"),
+        "error": public.get("error"),
+        "evidence": public.get("evidence") or [],
+        "created_at": public.get("created_at"),
+        "updated_at": public.get("updated_at"),
+    }
 
 
 @app.get("/payment/{payment_id}")
