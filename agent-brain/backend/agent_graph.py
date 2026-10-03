@@ -8,6 +8,7 @@ edge runs. Tool calls hit the mall and the policy service.
 from __future__ import annotations
 
 import hashlib
+import math
 import operator
 import re
 from datetime import datetime, timezone
@@ -45,12 +46,30 @@ THOUGHTS = {
     "HALTED": "Policy said HALT. Do not pay.",
     "ESCALATION_REFUSED": "Mother refused. Do not pay.",
     "ESCALATION_EXPIRED": "The 10 minutes ran out. Do not pay.",
+    "PREVIEW_READY": "Quote is ready. The shopper asked not to check out.",
 }
+
+_PREVIEW_ONLY = re.compile(
+    r"\b(?:don't|do not|never)\s+(?:buy|purchase|order)|"
+    r"\bwithout\s+(?:buying|purchasing|ordering)|"
+    r"\b(?:quote|compare)\s+only\b|"
+    r"\bno\s+purchase\b|"
+    r"\bshow\s+me\b.{0,100}\bbefore\s+(?:checkout|ordering|buying)\b",
+    re.IGNORECASE,
+)
+_MAX_TOTAL = re.compile(
+    r"(?:do not spend more than|don't spend more than|no more than|not more than|"
+    r"maximum(?: delivered total)?(?: is| of)?|max(?:imum)?(?: spend)?(?: is| of)?|"
+    r"under|within|budget(?: is| of)?|limit(?: is| of)?)\s*"
+    r"(?:HK\$|HKD|\$)?\s*(\d+(?:\.\d{1,2})?)\b",
+    re.IGNORECASE,
+)
 
 
 class AgentState(TypedDict, total=False):
     intent: str
     monthly_spent: float
+    user_max_total: float | None
     escalation_id: str
     escalation_status: str
     policy_status: str
@@ -72,6 +91,7 @@ class AgentState(TypedDict, total=False):
     llm_react: list
     plan_status: str
     stop: bool
+    preview_only: bool
     pending_event: dict
     path: Annotated[list, operator.add]
     audit_log: Annotated[list, operator.add]
@@ -91,6 +111,11 @@ def parse_goal(intent: str) -> dict:
         skip = {"buy", "please", "a", "the", "some"}
         query = " ".join(word for word in text.split() if word not in skip) or intent
     return {"intent": intent, "query": query, "qty": qty}
+
+
+def _user_max_total(intent: str) -> float | None:
+    match = _MAX_TOTAL.search(intent)
+    return round(float(match.group(1)), 2) if match else None
 
 
 def _pending(
@@ -247,6 +272,71 @@ def _failure(name: str, event: str, reason: str) -> dict:
     }
 
 
+def _finite_money(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(amount, 2) if math.isfinite(amount) else None
+
+
+def _verify_cart_quote(raw: dict, requested: list[dict], catalog: list[dict]) -> None:
+    """Fail closed when the priced cart diverges from catalogue data or totals."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("line_items"), list):
+        raise ValueError("Cart quote is missing line items")
+    if raw.get("currency") != "HKD" or len(raw["line_items"]) != len(requested):
+        raise ValueError("Cart quote has an unexpected currency or item count")
+    products = {str(item.get("id")): item for item in catalog}
+    quoted_by_key = {}
+    for line in raw["line_items"]:
+        if not isinstance(line, dict):
+            raise ValueError("Cart quote contains an invalid line")
+        key = (str(line.get("sku") or ""), line.get("qty"))
+        if key in quoted_by_key:
+            raise ValueError("Cart quote contains a duplicate line")
+        quoted_by_key[key] = line
+
+    line_totals = []
+    for item in requested:
+        sku = str(item.get("sku") or "")
+        qty = item.get("qty")
+        product = products.get(sku)
+        line = quoted_by_key.get((sku, qty))
+        if product is None or line is None:
+            raise ValueError("Cart quote does not match the requested catalogue items")
+        expected_unit = _finite_money(product.get("price"))
+        quoted_unit = _finite_money(line.get("unit_price"))
+        quoted_total = _finite_money(line.get("line_total"))
+        if (
+            expected_unit is None
+            or quoted_unit != expected_unit
+            or line.get("merchant") != product.get("merchant")
+            or line.get("category") != product.get("category")
+            or isinstance(qty, bool)
+            or not isinstance(qty, int)
+            or qty < 1
+            or quoted_total != round(expected_unit * qty, 2)
+        ):
+            raise ValueError("Cart price or product details differ from the catalogue")
+        line_totals.append(quoted_total)
+
+    subtotal = _finite_money(raw.get("subtotal"))
+    shipping = _finite_money(raw.get("shipping_fee"))
+    tax = _finite_money(raw.get("tax", 0))
+    landed = _finite_money(raw.get("total_landed_cost"))
+    if (
+        subtotal is None
+        or shipping is None
+        or tax is None
+        or landed is None
+        or subtotal != round(sum(line_totals), 2)
+        or landed != round(subtotal + shipping + tax, 2)
+    ):
+        raise ValueError("Cart quote totals are inconsistent")
+
+
 class ShoppingAgent:
     def __init__(self, mall, policy: PolicyClient, planner=None):
         self.mall = mall
@@ -265,7 +355,9 @@ class ShoppingAgent:
             {
                 "intent": intent,
                 "monthly_spent": monthly_spent,
+                "user_max_total": _user_max_total(intent),
                 "escalation_id": escalation_id or "",
+                "preview_only": bool(_PREVIEW_ONLY.search(intent)),
                 "path": [],
                 "audit_log": [],
             }
@@ -553,10 +645,16 @@ class ShoppingAgent:
             return self._price_basket(state)
         product = state["product"]
         qty = int(state["goal"]["qty"])
+        items = [{"sku": product["id"], "qty": qty}]
         try:
             quoted = self.mall.cart(product["id"], qty)
+            _verify_cart_quote(quoted, items, [product])
         except Exception:
-            return _failure("price_cart", "CART_PRICED", "Mall cart failed")
+            return _failure(
+                "price_cart",
+                "CART_PRICED",
+                "Mall cart failed or its quote did not match the catalogue",
+            )
         return {
             "path": ["price_cart"],
             "quote": _quote(quoted),
@@ -569,11 +667,18 @@ class ShoppingAgent:
 
     def _price_basket(self, state: AgentState) -> dict:
         try:
+            catalog = self._catalog()
+
+            def verified_cart(items: list[dict]) -> dict:
+                quote = self.mall.cart_lines(items)
+                _verify_cart_quote(quote, items, catalog)
+                return quote
+
             fitted = fit_basket(
-                self._catalog(),
+                catalog,
                 state["needs"],
                 float(state.get("monthly_spent") or 0),
-                self.mall.cart_lines,
+                verified_cart,
                 self.policy.check_lines,
             )
         except Exception:
@@ -596,7 +701,24 @@ class ShoppingAgent:
         }
 
     def _after_cart(self, state: AgentState) -> str:
-        return "end" if state.get("stop") else "check_budget"
+        if state.get("stop"):
+            return "end"
+        maximum = state.get("user_max_total")
+        quote = state.get("quote") or {}
+        if maximum is not None and float(quote.get("total_landed_cost", 0)) > maximum:
+            return "user_limit"
+        return "check_budget"
+
+    def _user_limit(self, state: AgentState) -> dict:
+        maximum = float(state["user_max_total"])
+        total = float((state.get("quote") or {})["total_landed_cost"])
+        reason = f"Quoted landed total HK${total:.2f} exceeds your HK${maximum:.2f} maximum."
+        return {
+            "path": ["user_limit"],
+            "plan_status": "HALTED",
+            "reply": reason,
+            "pending_event": _pending("HALTED", "HALTED", reason),
+        }
 
     def _budget(self, state: AgentState) -> dict:
         if state.get("needs"):
@@ -633,16 +755,38 @@ class ShoppingAgent:
             return "end"
         if state.get("question"):
             return "ask"
+        if state.get("preview_only"):
+            return "preview"
         return {
             "PASS": "execute_payment",
             "ESCALATE": "create_escalation",
             "HALT": "halt",
         }[state["policy_status"]]
 
+    def _preview(self, state: AgentState) -> dict:
+        return {
+            "path": ["preview"],
+            "plan_status": "READY",
+            "reply": "Quote is ready; no purchase was made.",
+            "pending_event": _pending(
+                "PREVIEW_READY",
+                "READY",
+                "Shopper requested a quote without checkout.",
+            ),
+        }
+
     def _pay(self, state: AgentState) -> dict:
         approved = state.get("escalation_status") == "APPROVED"
-        passed = state.get("policy_status") == "PASS" or (
-            isinstance(state.get("policy"), dict) and state["policy"].get("status") == "PASS"
+        policy = state.get("policy") or {}
+        quote = state.get("quote") or {}
+        escalation = state.get("escalation") or {}
+        authorized_total = _finite_money(quote.get("total_landed_cost"))
+        valid_total = authorized_total is not None and authorized_total >= 0
+        passed = (
+            state.get("policy_status") == "PASS"
+            and policy.get("status") == "PASS"
+            and valid_total
+            and _finite_money(policy.get("amount")) == authorized_total
         )
         if not approved and not passed:
             return {
@@ -655,12 +799,33 @@ class ShoppingAgent:
                     "Pay allowed only after PASS or APPROVED",
                 ),
             }
-        quote = state.get("quote") or {}
+        if not valid_total:
+            return {
+                "path": ["execute_payment"],
+                "plan_status": "FAILED",
+                "stop": True,
+                "pending_event": _pending(
+                    "PAYMENT",
+                    "FAILED",
+                    "Missing or invalid verified landed total",
+                ),
+            }
+        if approved and (
+            escalation.get("status") != "APPROVED"
+            or _finite_money(escalation.get("amount")) != authorized_total
+        ):
+            return {
+                "path": ["execute_payment"],
+                "plan_status": "FAILED",
+                "stop": True,
+                "pending_event": _pending(
+                    "PAYMENT",
+                    "FAILED",
+                    "Approved escalation amount does not match the verified quote",
+                ),
+            }
         product = state.get("product") or {}
         goal = state.get("goal") or {}
-        total = quote.get("total_landed_cost")
-        if total is None and state.get("escalation"):
-            total = state["escalation"].get("amount")
         sku = product.get("id") or (state.get("escalation") or {}).get("sku")
         qty = goal.get("qty") or 1
         tag = "PASS" if passed and not approved else "ESCALATE"
@@ -669,18 +834,39 @@ class ShoppingAgent:
             escalation_id = "none"
         try:
             route = state.get("payment_route") or "mastercard"
-            payment = self.mall.pay(float(total), f"{sku}:{qty}:{tag}:{escalation_id}", route)
+            payment = self.mall.pay(authorized_total, f"{sku}:{qty}:{tag}:{escalation_id}", route)
         except Exception:
             return _failure("execute_payment", "PAYMENT", "Mall payment failed")
-        plan_status = "COMPLETED" if payment["success"] else "FAILED"
-        reason = "Payment success" if payment["success"] else (payment.get("error") or "Payment failed")
-        log_status = "COMPLETED" if payment["success"] else "FAILED"
-        return {
+        charged = payment.get("charged")
+        charge_matches = False
+        actual_charge = _finite_money(charged)
+        if payment.get("success") and actual_charge is not None:
+            charge_matches = (
+                actual_charge == authorized_total
+                and payment.get("currency") == quote.get("currency", "HKD")
+            )
+        payment_success = bool(payment.get("success")) and charge_matches
+        plan_status = "COMPLETED" if payment_success else "FAILED"
+        if payment_success:
+            reason = "Payment success"
+        elif payment.get("success"):
+            received = f"HK${actual_charge:.2f}" if actual_charge is not None else "an unknown amount"
+            reason = (
+                f"Payment response mismatch: authorized HK${authorized_total:.2f}, "
+                f"but the gateway reported {received}. Verify the charge before retrying."
+            )
+        else:
+            reason = payment.get("error") or "Payment failed"
+        log_status = "COMPLETED" if payment_success else "FAILED"
+        update = {
             "path": ["execute_payment"],
             "payment": payment,
             "plan_status": plan_status,
             "pending_event": _pending("PAYMENT", log_status, reason),
         }
+        if payment.get("success") and not charge_matches:
+            update["reply"] = reason
+        return update
 
     def _escalate(self, state: AgentState) -> dict:
         product = state["product"]
@@ -771,6 +957,8 @@ class ShoppingAgent:
         graph.add_node("create_escalation", self._escalate)
         graph.add_node("halt", self._halt)
         graph.add_node("ask", self._ask)
+        graph.add_node("preview", self._preview)
+        graph.add_node("user_limit", self._user_limit)
         graph.add_node("abort", self._abort)
         graph.add_node("hold", self._hold)
         for name in (
@@ -785,6 +973,8 @@ class ShoppingAgent:
             "audit_abort",
             "audit_hold",
             "audit_followup",
+            "audit_preview",
+            "audit_user_limit",
         ):
             graph.add_node(name, self._audit(name))
 
@@ -817,7 +1007,11 @@ class ShoppingAgent:
         graph.add_conditional_edges(
             "audit_cart",
             self._after_cart,
-            {"check_budget": "check_budget", "end": END},
+            {
+                "check_budget": "check_budget",
+                "user_limit": "user_limit",
+                "end": END,
+            },
         )
         graph.add_edge("check_budget", "audit_policy")
         graph.add_conditional_edges(
@@ -828,11 +1022,14 @@ class ShoppingAgent:
                 "create_escalation": "create_escalation",
                 "halt": "halt",
                 "ask": "ask",
+                "preview": "preview",
                 "end": END,
             },
         )
         graph.add_edge("ask", "audit_followup")
         graph.add_edge("audit_followup", END)
+        graph.add_edge("preview", "audit_preview")
+        graph.add_edge("user_limit", "audit_user_limit")
         graph.add_edge("execute_payment", "audit_payment")
         graph.add_edge("audit_payment", END)
         graph.add_edge("create_escalation", "audit_escalation")
