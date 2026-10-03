@@ -13,6 +13,7 @@
   --size-badge: #3b3f46;
   --heart: #e5484d;
   --radius-input: 12px; /* every text field, search box and dropdown */
+  --radius-button: var(--radius-input); /* every button and chip: same corners as the inputs */
 }
 
 :root[data-theme="dark"] {
@@ -983,3 +984,18 @@ html.modal-open { overflow: hidden; }
   background-size: 16px;
   cursor: pointer;
 }
+
+/* ---------- One rounding for every button ----------
+   Same corners as inputs (--radius-button). Circular icons (favourite heart, the round
+   "+" inside Add product) and non-button labels (badges, status pills) keep their shape. */
+.btn-primary, .btn-soft, .btn, .add-btn, .auth-btn, .picker-add, .review-btn,
+.store-chip, .category-pill, .nav-link, .side-item, .menu-row, .menu-btn, .menu-close,
+.agent-sidebar-head .menu-close, .menu-logout, .auth-eye, .auth-back, .chat-head-btn,
+.composer-send, .basket-close, .basket-remove, .stepper button, .tabs button, .segmented button,
+.store-row, .icon-btn, .link-btn {
+  border-radius: var(--radius-button);
+}
+/* Frames around tab buttons: a little rounder so they wrap the buttons evenly. */
+.tabs { border-radius: calc(var(--radius-button) + 4px); }
+.segmented { border-radius: calc(var(--radius-button) + 3px); }
+
