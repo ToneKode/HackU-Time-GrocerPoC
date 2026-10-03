@@ -1,7 +1,8 @@
 # HANDOFF — Payment module (HKT workshop Topic 4)
 
-**Status: IMPLEMENTED on branch `cursor/payment-module-c31f`.**  
-Use this doc to continue (Postgres persistence for payments, frontend rail UI, etc.).
+**Status: payment records persist in Postgres** (`payments`, `payment_jti` in `persistance/backend/schema.sql`).  
+In-memory store remains when `DATABASE_URL` is empty, or when it is unset and Postgres is unreachable.  
+Use this doc to continue (frontend rail UI, risk step-up, refund evidence).
 
 **Workshop source:** `20261002 Hackathon Workshop_HKT.pptx` (Fintech track, Topic 4).  
 **Base:** `main` (includes merged `persistance`).
@@ -18,15 +19,17 @@ Use this doc to continue (Postgres persistence for payments, frontend rail UI, e
 | Net-benefit recommender | `recommender.py` |
 | Agent `PaymentClient` | `agent-brain/backend/clients.py` |
 | Agent `_pay` → draft+authorize | `agent_graph.py` (mall.pay fallback if :8004 down) |
+| Postgres payment records | `persistance/backend/schema.sql` (`002_payments`), `payment/backend/pg_store.py` |
 
 ### State machine
 `DRAFT → AUTHORIZED → CAPTURED` (auto-capture on success) · `FAILED` · `REFUNDED`
 
 ### Verify
 ```bash
-cd payment/backend && pytest -q   # 6 passed
+cd payment/backend && pytest -q   # memory suite always; Postgres suite when :5432 is up
 uvicorn main:app --port 8004
 # Agent: PAYMENT_API_BASE_URL=http://127.0.0.1:8004 USE_SCRIPTED_PLANNER=true
+# Unset DATABASE_URL auto-detects postgresql://tg:tg@127.0.0.1:5432/time_grocer
 ```
 
 ---
@@ -37,12 +40,11 @@ Payment is a **controlled process**: scoped token, rail recommend, authorize/cap
 
 ## Next-chat backlog
 
-1. Persist payment records in Postgres (`persistance` schema) instead of memory
-2. Risk score → step-up MFA flag (beyond existing >HK$500 escalate)
-3. Refund UI + dispute evidence pack export
-4. Frontend: show recommended rail + draft before execute
-5. Apply `payment_route` discount into mall cart totals (Person 4)
-6. Optional: set `MOCK_ACQUIRER_URL=http://127.0.0.1:8000` to charge via real mock mall
+1. Risk score → step-up MFA flag (beyond existing >HK$500 escalate)
+2. Refund UI + dispute evidence pack export
+3. Frontend: show recommended rail + draft before execute
+4. Apply `payment_route` discount into mall cart totals (Person 4)
+5. Optional: set `MOCK_ACQUIRER_URL=http://127.0.0.1:8000` to charge via real mock mall
 
 ## Ports
 

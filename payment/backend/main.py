@@ -14,17 +14,21 @@ from pydantic import BaseModel, Field
 from config import settings
 from rails import charge
 from recommender import pick_rail, recommend
-from store import PaymentStore, draft_record
+from store import draft_record, open_store
 from tokens import mint, verify
 
 log = logging.getLogger("payment")
 S = settings()
-store = PaymentStore(S["redis_url"])
+store = open_store(S["database_url"], S["redis_url"])
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("Payment API ready (acquirer=%s)", S["mock_acquirer_url"] or "local-mock")
+    log.info(
+        "Payment API ready (store=%s acquirer=%s)",
+        store.backend,
+        S["mock_acquirer_url"] or "local-mock",
+    )
     yield
 
 
@@ -83,6 +87,7 @@ def health() -> dict:
     return {
         "ok": True,
         "service": "payment",
+        "store": store.backend,
         "acquirer": S["mock_acquirer_url"] or "local-mock",
         "rails": ["mastercard", "unionpay"],
     }

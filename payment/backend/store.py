@@ -1,4 +1,8 @@
-"""In-memory / Redis payment record store."""
+"""Payment record store.
+
+Postgres (`persistance` schema) is the durable path. Memory / optional Redis
+is the zero-dependency fallback used by unit tests and when Postgres is down.
+"""
 from __future__ import annotations
 
 import json
@@ -15,6 +19,8 @@ def new_id() -> str:
 
 
 class PaymentStore:
+    backend = "memory"
+
     def __init__(self, redis_url: str = ""):
         self._lock = threading.Lock()
         self._mem: dict[str, dict] = {}
@@ -60,6 +66,15 @@ class PaymentStore:
                     keys = list(self._r.scan_iter(match=pattern, count=200))
                     if keys:
                         self._r.delete(*keys)
+
+
+def open_store(database_url: str = "", redis_url: str = ""):
+    """Postgres when DATABASE_URL is set; otherwise the in-memory store."""
+    if database_url:
+        from pg_store import PostgresPaymentStore
+
+        return PostgresPaymentStore(database_url)
+    return PaymentStore(redis_url)
 
 
 def draft_record(

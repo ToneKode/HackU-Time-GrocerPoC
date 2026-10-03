@@ -1,6 +1,15 @@
+def test_memory_store_when_database_url_empty():
+    from store import PaymentStore, open_store
+
+    store = open_store("", "")
+    assert isinstance(store, PaymentStore)
+    assert store.backend == "memory"
+
+
 def test_health(c):
     body = c.get("/health").json()
     assert body["ok"] is True and body["service"] == "payment"
+    assert body["store"] == "memory"
     assert "mastercard" in body["rails"]
 
 

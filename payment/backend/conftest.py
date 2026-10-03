@@ -7,6 +7,7 @@ os.environ["PAYMENT_TOKEN_TTL_SECONDS"] = "60"
 os.environ["DEMO_MODE"] = "true"
 os.environ["MOCK_ACQUIRER_URL"] = ""
 os.environ["REDIS_URL"] = ""
+os.environ["DATABASE_URL"] = ""  # unit tests stay on the in-memory store
 
 import pytest
 from fastapi.testclient import TestClient
