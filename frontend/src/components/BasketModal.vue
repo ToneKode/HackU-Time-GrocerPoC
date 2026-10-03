@@ -11,7 +11,7 @@ import QtyStepper from './shop/QtyStepper.vue'
 import ProductPicker from './ProductPicker.vue'
 import Icon from './shop/Icon.vue'
 import {
-  Cancel01Icon, ArrowLeft01Icon, ArrowRight01Icon, CheckmarkCircle02Icon, Delete02Icon, PlusSignIcon,
+  Cancel01Icon, CheckmarkCircle02Icon, Delete02Icon, PlusSignIcon,
   ArrowDataTransferHorizontalIcon, AlertCircleIcon,
 } from '@hugeicons/core-free-icons'
 
@@ -54,7 +54,6 @@ function setQty(item, qty) {
 }
 function remove(item) {
   items.value = items.value.filter((i) => i !== item)
-  nextTick(updateArrows)
 }
 
 const storeCount = computed(() => new Set(items.value.map((i) => i.merchant)).size)
@@ -96,7 +95,6 @@ function onPick(product) {
   } else {
     items.value.push(fromProduct(product, 1))
   }
-  nextTick(updateArrows)
 }
 function fromProduct(p, qty) {
   return {
@@ -110,22 +108,7 @@ function confirm() {
   emit('confirm', edited.value ? items.value.map((i) => ({ sku: i.sku, qty: i.qty })) : null)
 }
 
-// ---- Horizontal scrolling ----
 const track = ref(null)
-const canLeft = ref(false)
-const canRight = ref(false)
-function updateArrows() {
-  const el = track.value
-  if (!el) return
-  canLeft.value = el.scrollLeft > 4
-  canRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 4
-}
-function scrollByCard(direction) {
-  const el = track.value
-  const card = el?.querySelector('.basket-item')
-  if (!el || !card) return
-  el.scrollBy({ left: direction * (card.offsetWidth + 14), behavior: 'smooth' })
-}
 
 // ---- Open / close ----
 const confirmButton = ref(null)
@@ -144,7 +127,6 @@ watch(
       window.addEventListener('keydown', onKey)
       await nextTick()
       if (track.value) track.value.scrollLeft = 0
-      updateArrows()
       confirmButton.value?.focus()
     } else {
       closePicker()
@@ -173,20 +155,12 @@ onBeforeUnmount(() => {
               <span v-if="edited" class="basket-edited">· {{ $t('basket.edited') }}</span>
             </p>
           </div>
-          <div class="basket-head-actions">
-            <button type="button" class="basket-arrow" :disabled="!canLeft" :aria-label="$t('basket.previous')" @click="scrollByCard(-1)">
-              <Icon :icon="ArrowLeft01Icon" :size="18" />
-            </button>
-            <button type="button" class="basket-arrow" :disabled="!canRight" :aria-label="$t('basket.next')" @click="scrollByCard(1)">
-              <Icon :icon="ArrowRight01Icon" :size="18" />
-            </button>
-            <button type="button" class="basket-close" :aria-label="$t('basket.close')" :disabled="busy" @click="emit('close')">
-              <Icon :icon="Cancel01Icon" :size="20" />
-            </button>
-          </div>
+          <button type="button" class="basket-close" :aria-label="$t('basket.close')" :disabled="busy" @click="emit('close')">
+            <Icon :icon="Cancel01Icon" :size="20" />
+          </button>
         </header>
 
-        <ul ref="track" class="basket-track" @scroll.passive="updateArrows">
+        <ul ref="track" class="basket-track">
           <li v-for="item in items" :key="item.sku" class="basket-item">
             <div class="basket-img" :style="{ background: categoryArt(item.category).tint }">
               <img v-if="item.image" :src="item.image" :alt="item.name" loading="lazy" />

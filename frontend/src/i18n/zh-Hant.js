@@ -286,8 +286,6 @@ export default {
     confirming: '正在確認…',
     notNow: '暫時不要',
     close: '關閉',
-    previous: '上一批貨品',
-    next: '更多貨品',
     review: '查看購物籃',
     confirmed: '已確認',
     confirmedMessage: '確認，請繼續。',

@@ -286,8 +286,6 @@ export default {
     confirming: 'Confirming…',
     notNow: 'Not now',
     close: 'Close',
-    previous: 'Previous items',
-    next: 'More items',
     review: 'Review basket',
     confirmed: 'Confirmed',
     confirmedMessage: 'Confirmed, go ahead.',

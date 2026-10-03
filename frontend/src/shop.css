@@ -831,15 +831,12 @@ html.modal-open { overflow: hidden; }
 }
 .basket-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 20px 24px 12px; }
 .basket-head h2 { margin: 0; font-size: 1.35rem; }
-.basket-head-actions { display: flex; gap: 8px; }
-.basket-arrow, .basket-close {
+.basket-close {
   width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px; cursor: pointer;
-  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+  border: 0; background: var(--surface-2); color: var(--text);
 }
-.basket-close { border: 0; background: var(--surface-2); }
-.basket-arrow:disabled { opacity: 0.35; cursor: default; }
 @media (hover: hover) {
-  .basket-arrow:not(:disabled):hover, .basket-close:hover { background: var(--surface-2); }
+  .basket-close:hover { background: var(--line); }
 }
 
 .basket-track {
@@ -905,7 +902,6 @@ html.modal-open { overflow: hidden; }
 
 @media (max-width: 700px) {
   .basket-head { padding: 16px 16px 10px; }
-  .basket-arrow { display: none; }
   .basket-track { padding: 4px 16px 14px; grid-auto-columns: 72%; scroll-padding-left: 16px; }
   .basket-foot { grid-template-columns: 1fr; gap: 12px; padding: 14px 16px max(16px, env(safe-area-inset-bottom)); }
   .basket-actions { align-items: stretch; }
