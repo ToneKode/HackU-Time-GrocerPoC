@@ -11,6 +11,8 @@ import hashlib
 import operator
 import os
 import re
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
@@ -75,8 +77,21 @@ class AgentState(TypedDict, total=False):
     plan_status: str
     stop: bool
     pending_event: dict
+    preview: bool
+    preview_id: str
+    confirmed: bool
     path: Annotated[list, operator.add]
     audit_log: Annotated[list, operator.add]
+
+
+# Preview mode: price the basket, return READY, and keep the state here until the shopper
+# confirms. The confirm request (preview_id) resumes at the policy check with the same basket.
+PREVIEW_TTL_SECONDS = 15 * 60
+PREVIEW_LIMIT = 200
+PREVIEW_KEYS = (
+    "intent", "goal", "product", "quote", "needs", "lines", "repairs", "question", "reply",
+    "payment_route", "payment_reason", "basket_policy", "policy_events", "llm_react", "audit_log",
+)
 
 
 def parse_goal(intent: str) -> dict:
@@ -255,6 +270,7 @@ class ShoppingAgent:
         self.policy = policy
         self.spend = spend
         self.planner = planner or OpenRouterPlanner()
+        self.previews: dict[str, dict] = {}
         self.graph = self._build()
 
     def _catalog(self) -> list[dict]:
@@ -278,19 +294,34 @@ class ShoppingAgent:
         monthly_spent: float,
         escalation_id: str | None,
         account_id: str | None = None,
+        preview: bool = False,
+        preview_id: str | None = None,
     ) -> dict:
         account = (account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
         spent = self._resolve_monthly_spent(account, monthly_spent)
-        result = self.graph.invoke(
-            {
-                "intent": intent,
-                "monthly_spent": spent,
-                "account_id": account,
-                "escalation_id": escalation_id or "",
-                "path": [],
-                "audit_log": [],
-            }
-        )
+        start: dict = {
+            "intent": intent,
+            "monthly_spent": spent,
+            "account_id": account,
+            "escalation_id": escalation_id or "",
+            "preview": bool(preview) and not preview_id and not escalation_id,
+            "path": [],
+            "audit_log": [],
+        }
+        if preview_id:
+            saved = self._take_preview(preview_id)
+            if saved is None:
+                return ActionPlan.model_validate(
+                    {
+                        "intent": intent,
+                        "status": "FAILED",
+                        "reply": "This basket preview has expired. Please ask again.",
+                        "audit_log": [],
+                    }
+                ).model_dump()
+            start.update(saved)
+            start["confirmed"] = True
+        result = self.graph.invoke(start)
         plan = {
             "intent": result.get("intent", intent),
             "status": result.get("plan_status", "FAILED"),
@@ -308,8 +339,26 @@ class ShoppingAgent:
             "reply": result.get("reply") or "",
             "react": build_react(result.get("audit_log") or [], result.get("goal"), result.get("llm_react")),
             "audit_log": result.get("audit_log", []),
+            "preview_id": result.get("preview_id") or "",
         }
         return ActionPlan.model_validate(plan).model_dump()
+
+    def _save_preview(self, state: AgentState) -> str:
+        now = time.monotonic()
+        for key in [k for k, v in self.previews.items() if v["expires"] < now]:
+            del self.previews[key]
+        while len(self.previews) >= PREVIEW_LIMIT:
+            del self.previews[next(iter(self.previews))]
+        preview_id = uuid.uuid4().hex
+        saved = {key: state[key] for key in PREVIEW_KEYS if key in state}
+        self.previews[preview_id] = {"state": saved, "expires": now + PREVIEW_TTL_SECONDS}
+        return preview_id
+
+    def _take_preview(self, preview_id: str) -> dict | None:
+        record = self.previews.pop(preview_id, None)
+        if record is None or record["expires"] < time.monotonic():
+            return None
+        return dict(record["state"])
 
     def _audit(self, name: str):
         def audit(state: AgentState) -> dict:
@@ -356,6 +405,8 @@ class ShoppingAgent:
         return update
 
     def _choose_entry(self, state: AgentState) -> str:
+        if state.get("confirmed"):
+            return "check_budget"
         status = state.get("escalation_status")
         if status == "APPROVED":
             return "execute_payment"
@@ -617,7 +668,20 @@ class ShoppingAgent:
         }
 
     def _after_cart(self, state: AgentState) -> str:
-        return "end" if state.get("stop") else "check_budget"
+        if state.get("stop"):
+            return "end"
+        if state.get("preview") and not state.get("question"):
+            return "await_confirm"
+        return "check_budget"
+
+    def _preview(self, state: AgentState) -> dict:
+        # No policy check and no payment yet: the shopper reviews the basket first.
+        return {
+            "path": ["await_confirm"],
+            "plan_status": "READY",
+            "payment": None,
+            "preview_id": self._save_preview(state),
+        }
 
     def _budget(self, state: AgentState) -> dict:
         if state.get("needs"):
@@ -804,6 +868,7 @@ class ShoppingAgent:
         graph.add_node("ask", self._ask)
         graph.add_node("abort", self._abort)
         graph.add_node("hold", self._hold)
+        graph.add_node("await_confirm", self._preview)
         for name in (
             "audit_intent",
             "audit_plan",
@@ -825,6 +890,7 @@ class ShoppingAgent:
             self._choose_entry,
             {
                 "reason": "reason",
+                "check_budget": "check_budget",
                 "execute_payment": "execute_payment",
                 "abort": "abort",
                 "hold": "hold",
@@ -848,8 +914,9 @@ class ShoppingAgent:
         graph.add_conditional_edges(
             "audit_cart",
             self._after_cart,
-            {"check_budget": "check_budget", "end": END},
+            {"check_budget": "check_budget", "await_confirm": "await_confirm", "end": END},
         )
+        graph.add_edge("await_confirm", END)
         graph.add_edge("check_budget", "audit_policy")
         graph.add_conditional_edges(
             "audit_policy",

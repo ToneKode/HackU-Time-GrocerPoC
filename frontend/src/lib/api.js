@@ -18,9 +18,13 @@ async function request(method, url, body) {
 }
 
 // start_or_resume -> ActionPlan. Never send escalation_status.
-export function sendIntent({ intent, monthly_spent, escalation_id }) {
+// preview: true -> the agent prices the basket and returns READY with preview_id (nothing is paid).
+// preview_id -> confirm that basket; the agent runs the policy check and payment.
+export function sendIntent({ intent, monthly_spent, escalation_id, preview, preview_id }) {
   const body = { intent, monthly_spent }
   if (escalation_id) body.escalation_id = escalation_id
+  if (preview_id) body.preview_id = preview_id
+  else if (preview) body.preview = true
   if (useMock) return mock.sendIntent(body)
   return request('POST', `${AGENT_URL}/agent/intent`, body)
 }

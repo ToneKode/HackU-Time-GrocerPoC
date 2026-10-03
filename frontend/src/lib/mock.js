@@ -77,17 +77,45 @@ function refresh(record) {
   if (esc.status === 'PENDING' && esc.remaining_seconds === 0) esc.status = 'EXPIRED'
 }
 
-export async function sendIntent({ intent, monthly_spent = 0, escalation_id }) {
+const previews = new Map() // preview_id -> priced plan waiting for Confirm
+
+export async function sendIntent({ intent, monthly_spent = 0, escalation_id, preview, preview_id }) {
   await wait(700)
   if (escalation_id) return resume(escalation_id)
+  if (preview_id) return confirmPreview(preview_id, Number(monthly_spent))
 
   const example = /bulk|大包|批量/i.test(intent) ? escalation_bulk : happy_path
   const { product, quote, goal } = structuredClone(example.response)
-  const policy = checkPolicy(quote.total_landed_cost, Number(monthly_spent))
-  const plan = { intent, status: 'READY', goal: { ...goal, intent }, product, quote, policy, escalation: null, payment: null, audit_log: [] }
+  const plan = { intent, status: 'READY', goal: { ...goal, intent }, product, quote, policy: null, escalation: null, payment: null, audit_log: [] }
 
   // INTENT_RECEIVED, PLAN, SEARCH, CART_PRICED are the same in every example.
-  const steps = example.response.audit_log.slice(0, 4).map(({ event, status, reason, thought }) => ({ event, status, reason, thought }))
+  const priced = example.response.audit_log.slice(0, 4).map(({ event, status, reason, thought }) => ({ event, status, reason, thought }))
+  plan.audit_log = await appendEntries([], priced)
+
+  if (preview) {
+    plan.preview_id = 'prv_' + Date.now().toString(36)
+    previews.set(plan.preview_id, structuredClone(plan))
+    return plan
+  }
+  return decideAndPay(plan, Number(monthly_spent))
+}
+
+async function confirmPreview(previewId, monthlySpent) {
+  const saved = previews.get(previewId)
+  previews.delete(previewId)
+  if (!saved) {
+    return { intent: '', status: 'FAILED', reply: 'This basket preview has expired. Please ask again.', audit_log: [], payment: null }
+  }
+  return decideAndPay(saved, monthlySpent)
+}
+
+// Policy check, then pay / escalate / halt. Continues the plan's audit chain.
+async function decideAndPay(plan, monthlySpent) {
+  const { product } = plan
+  const policy = checkPolicy(plan.quote.total_landed_cost, monthlySpent)
+  plan.policy = policy
+  delete plan.preview_id
+  const steps = []
   steps.push({ event: 'POLICY_CHECK', status: policy.status, reason: policy.reason, thought: thoughtOf(happy_path, 'POLICY_CHECK') })
 
   let record = null
@@ -118,7 +146,7 @@ export async function sendIntent({ intent, monthly_spent = 0, escalation_id }) {
     steps.push(paymentStep(plan.payment))
   }
 
-  plan.audit_log = await appendEntries([], steps)
+  plan.audit_log = await appendEntries(plan.audit_log, steps)
   if (record) record.plan = structuredClone(plan)
   return plan
 }

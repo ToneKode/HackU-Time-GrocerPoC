@@ -120,6 +120,8 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             body.monthly_spent,
             body.escalation_id,
             account_id=body.account_id,
+            preview=body.preview,
+            preview_id=body.preview_id,
         )
         return ActionPlan.model_validate(plan)
 

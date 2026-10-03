@@ -10,6 +10,7 @@ import { money } from '../lib/format.js'
 import { productName, storeName, policyReason } from '../i18n/index.js'
 import { session } from '../stores/auth.js'
 import OrderCard from '../components/OrderCard.vue'
+import BasketModal from '../components/BasketModal.vue'
 import ApprovalCard from '../components/ApprovalCard.vue'
 import TraceList from '../components/TraceList.vue'
 import BudgetCard from '../components/BudgetCard.vue'
@@ -18,6 +19,7 @@ import ComparisonCard from '../components/ComparisonCard.vue'
 import Icon from '../components/shop/Icon.vue'
 import {
   AiMagicIcon, ArrowUp02Icon, SlidersHorizontalIcon, Cancel01Icon, Delete02Icon, ArrowDown01Icon, ArrowUp01Icon,
+  ShoppingBasket01Icon, CheckmarkCircle02Icon,
 } from '@hugeicons/core-free-icons'
 
 const { t, tm, rt } = useI18n()
@@ -84,7 +86,24 @@ function send(text = draft.value) {
   nextTick(autosize)
   const request = { intent, monthly_spent: Number(monthlySpent.value) || 0 }
   push({ role: 'user', kind: 'text', text: intent })
-  runAgent(request)
+  runAgent(request, undefined, { preview: true })
+}
+
+// ---- Basket review (READY preview -> Confirm) ----
+const reviewingId = ref(null) // id of the agent message whose basket is open in the sheet
+const reviewPlan = computed(() => messages.value.find((m) => m.id === reviewingId.value)?.plan ?? null)
+
+function openReview(message) {
+  reviewingId.value = message.id
+}
+
+function confirmBasket() {
+  const message = messages.value.find((m) => m.id === reviewingId.value)
+  reviewingId.value = null
+  if (!message || message.confirmed || busy.value) return
+  message.confirmed = true
+  push({ role: 'user', kind: 'text', text: t('basket.confirmedMessage') })
+  runAgent(message.request, undefined, { preview_id: message.plan.preview_id })
 }
 
 // ---- Polling the escalation every second while it is PENDING ----
@@ -119,14 +138,16 @@ function stopPolling() {
 onBeforeUnmount(stopPolling)
 
 // ---- Agent calls ----
-async function runAgent(request, escalationId) {
+// options: { preview: true } for a new request, { preview_id } to confirm a previewed basket.
+async function runAgent(request, escalationId, options = {}) {
   stopPolling()
   busy.value = true
   const thinking = push({ role: 'agent', kind: 'thinking' })
   try {
-    const plan = await api.sendIntent({ ...request, escalation_id: escalationId })
+    const plan = await api.sendIntent({ ...request, escalation_id: escalationId, ...options })
     if (plan.escalation) escalations[plan.escalation.escalation_id] = plan.escalation
     replace(thinking, { kind: 'plan', plan, request })
+    if (isPreview(plan)) reviewingId.value = thinking.id
     if (plan.status === 'ESCALATED' && plan.escalation?.status === 'PENDING') startPolling(plan.escalation.escalation_id)
   } catch (e) {
     replace(thinking, { kind: 'error', text: t('agentChat.error', { message: e.message }) })
@@ -162,12 +183,22 @@ async function onDecide(message, decision) {
 }
 
 // The sentence the agent says for a plan.
+const isPreview = (plan) => plan.status === 'READY' && Boolean(plan.preview_id)
+
 function summary(plan) {
+  if (isPreview(plan)) {
+    const count = plan.lines?.length || plan.quote?.line_items?.length || 1
+    return t('agentChat.previewReady', { items: t('basket.items', count), amount: money(plan.quote?.total_landed_cost) })
+  }
   if (plan.reply) return plan.reply
   if (plan.question) return plan.question
   const product = plan.product ? productName(plan.product) : ''
   const store = plan.product ? storeName(plan.product.merchant) : ''
   const amount = money(plan.payment?.charged ?? plan.policy?.amount ?? plan.quote?.total_landed_cost)
+  if (plan.status === 'COMPLETED' && plan.lines?.length > 1) {
+    const stores = new Set(plan.lines.map((l) => l.merchant)).size
+    return t('agentChat.doneBasket', { items: t('basket.items', plan.lines.length), stores: t('basket.stores', stores), amount })
+  }
   switch (plan.status) {
     case 'COMPLETED':
       return t('agentChat.done', { product, store, amount })
@@ -193,6 +224,7 @@ function llmSteps(plan) {
 function clearChat() {
   stopPolling()
   messages.value = []
+  reviewingId.value = null
   for (const key of Object.keys(escalations)) delete escalations[key]
   for (const key of Object.keys(openSteps)) delete openSteps[key]
 }
@@ -258,9 +290,16 @@ const userInitial = computed(() => (session.user?.name?.charAt(0) || t('agentCha
             <!-- agent result -->
             <template v-else-if="m.kind === 'plan'">
               <p v-for="(step, i) in llmSteps(m.plan)" :key="`${m.id}-thought-${i}`" class="bubble">{{ step.thought }}</p>
+              <p v-if="isPreview(m.plan) && m.plan.reply" class="bubble">{{ m.plan.reply }}</p>
               <p class="bubble">{{ summary(m.plan) }}</p>
               <p v-if="m.plan.question && m.plan.reply" class="bubble">{{ m.plan.question }}</p>
-              <OrderCard v-if="m.plan.payment || m.plan.lines?.length" :plan="m.plan" class="msg-card" />
+              <template v-if="isPreview(m.plan)">
+                <span v-if="m.confirmed" class="review-done"><Icon :icon="CheckmarkCircle02Icon" :size="16" /> {{ $t('basket.confirmed') }}</span>
+                <button v-else type="button" class="btn-primary review-btn" :disabled="busy" @click="openReview(m)">
+                  <Icon :icon="ShoppingBasket01Icon" :size="18" /> {{ $t('basket.review') }}
+                </button>
+              </template>
+              <OrderCard v-else-if="m.plan.payment || m.plan.lines?.length" :plan="m.plan" class="msg-card" />
               <ApprovalCard
                 v-if="m.plan.status === 'ESCALATED' && escalations[m.plan.escalation.escalation_id]"
                 :escalation="escalations[m.plan.escalation.escalation_id]"
@@ -330,5 +369,6 @@ const userInitial = computed(() => (session.user?.name?.charAt(0) || t('agentCha
         <Icon :icon="Delete02Icon" :size="16" /> {{ $t('agentChat.clearChat') }}
       </button>
     </aside>
+    <BasketModal :plan="reviewPlan" @confirm="confirmBasket" @close="reviewingId = null" />
   </main>
 </template>

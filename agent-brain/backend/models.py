@@ -20,6 +20,10 @@ class IntentIn(BaseModel):
     monthly_spent: float = 0
     escalation_id: str | None = None
     account_id: str | None = None
+    # preview=True: stop after pricing and return READY with a preview_id (no policy check, no payment).
+    # preview_id: confirm that basket; the agent continues with the policy check and payment.
+    preview: bool = False
+    preview_id: str | None = None
 
 
 class Goal(BaseModel):
@@ -159,3 +163,4 @@ class ActionPlan(BaseModel):
     reply: str = ""
     react: list[ReactStep] = Field(default_factory=list)
     audit_log: list[AuditEntry]
+    preview_id: str = ""

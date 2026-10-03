@@ -732,3 +732,76 @@ if __name__ == "__main__":
     test_team_contract_covers_both_readers()
     test_home_page_does_not_dump_the_plan()
     print("ok")
+
+
+def test_preview_prices_without_paying_then_confirm_pays_the_same_basket() -> None:
+    api, _policy = client()
+    preview = api.post("/agent/intent", json={"intent": "cheap toilet paper", "preview": True}).json()
+    assert preview["status"] == "READY"
+    assert preview["preview_id"]
+    assert preview["product"]["id"] == "SKU001"
+    assert preview["quote"]["total_landed_cost"] == 59.9
+    assert preview["policy"] is None
+    assert preview["payment"] is None
+    assert events(preview) == ["INTENT_RECEIVED", "PLAN", "SEARCH", "CART_PRICED"]
+    assert_chain(preview["audit_log"])
+
+    done = api.post(
+        "/agent/intent",
+        json={"intent": "cheap toilet paper", "preview_id": preview["preview_id"]},
+    ).json()
+    assert done["status"] == "COMPLETED"
+    assert done["product"]["id"] == "SKU001"
+    assert done["policy"]["status"] == "PASS"
+    assert done["payment"]["charged"] == 59.9
+    assert events(done) == ["INTENT_RECEIVED", "PLAN", "SEARCH", "CART_PRICED", "POLICY_CHECK", "PAYMENT"]
+    assert_chain(done["audit_log"])
+
+    again = api.post(
+        "/agent/intent",
+        json={"intent": "cheap toilet paper", "preview_id": preview["preview_id"]},
+    ).json()
+    assert again["status"] == "FAILED"
+    assert again["payment"] is None
+
+
+def test_confirmed_preview_over_the_cap_escalates() -> None:
+    api, _policy = client()
+    preview = api.post("/agent/intent", json={"intent": "2 best rated shampoo", "preview": True}).json()
+    assert preview["status"] == "READY"
+    assert preview["escalation"] is None
+    done = api.post(
+        "/agent/intent",
+        json={"intent": "2 best rated shampoo", "preview_id": preview["preview_id"]},
+    ).json()
+    assert done["status"] == "ESCALATED"
+    assert done["escalation"]["amount"] == 560.0
+    assert done["payment"] is None
+    assert_chain(done["audit_log"])
+
+
+def test_basket_preview_then_confirm_pays() -> None:
+    def planner(intent: str, catalog: list[dict]) -> dict:
+        return {
+            "needs": [
+                {"query": "toilet paper", "qty": 1, "sell_point": "cheap", "priority": 1, "sku": "SKU001"},
+                {"query": "food container", "qty": 1, "sell_point": "cheap", "priority": 2, "sku": "SKU028"},
+            ],
+            "thought": "One roll and one box, two shops.",
+            "model": "scripted",
+        }
+
+    api = TestClient(create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), planner)))
+    preview = api.post("/agent/intent", json={"intent": "toilet paper and a food container", "preview": True}).json()
+    assert preview["status"] == "READY"
+    assert [line["sku"] for line in preview["lines"]] == ["SKU001", "SKU028"]
+    assert preview["payment"] is None
+    done = api.post(
+        "/agent/intent",
+        json={"intent": "toilet paper and a food container", "preview_id": preview["preview_id"]},
+    ).json()
+    assert done["status"] == "COMPLETED"
+    assert [line["sku"] for line in done["lines"]] == ["SKU001", "SKU028"]
+    assert done["payment"]["charged"] == 79.8
+    assert "POLICY_CHECK" in events(done)
+    assert_chain(done["audit_log"])

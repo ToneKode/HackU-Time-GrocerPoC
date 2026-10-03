@@ -36,11 +36,12 @@
     "call": {
       "method": "POST",
       "url": "http://127.0.0.1:8002/agent/intent",
-      "body": {"intent": "string", "monthly_spent": 0, "escalation_id": "omit on a new purchase"}
+      "body": {"intent": "string", "monthly_spent": 0, "escalation_id": "omit on a new purchase", "preview": "true on a new purchase from the chat: stop after pricing and return READY with preview_id. Omit to keep the one-shot flow.", "preview_id": "send back to confirm that basket. The agent resumes at the policy check, then pays, escalates or halts. One use, expires after 15 minutes."}
     },
     "do_not_call": ["GET /products", "POST /cart", "POST /pay", "POST /check_policy", "POST /log_event", "POST /create_escalation"],
     "render_lines_when": "lines is non-empty. One row per line, with product_reason and merchant_reason.",
     "render_question_when": "status == NEEDS_INPUT. Do not show a paid order and do not start the approval timer.",
+    "render_preview_when": "status == READY and preview_id is set. Show the basket and a Confirm button. No policy result and no payment yet.",
     "reply": "Send the shopper's answer as a new intent. The agent does not yet apply 'make the swap' or 'send for approval'.",
     "audit": "Show every BASKET_PICKED, POLICY_CHECK, and BASKET_REVISED, in index order. POLICY_CHECK.result and HALTED.result are the policy engine snapshot. They are not part of the hash.",
     "labels": {
@@ -49,6 +50,7 @@
         "HALTED": "Halted",
         "ESCALATED": "Needs your approval",
         "NEEDS_INPUT": "Need a choice",
+        "READY": "Review your basket",
         "FAILED": "Could not finish",
         "ABORTED": "Purchase cancelled"
       }
@@ -60,6 +62,7 @@
     "payment_route": "The route person 1 chose. Person 4 echoes it on POST /pay.",
     "payment_reason": "Why that route. Estimated promo savings are not subtracted from quote.total_landed_cost.",
     "question": "Empty unless status is NEEDS_INPUT.",
+    "preview_id": "Set only on a READY preview. Empty otherwise.",
     "reply": "What the shopper should read. When some categories are blacklisted, this says so. lines, quote, and payment are only the items that can still be paid.",
     "react": "ReAct trace in order. Each step has thought, action, observation, and source. source llm is the model. source agent is a tool step. source catalog means code built the needs without the model.",
     "policy": "The last policy result. Earlier results are in audit_log.",
