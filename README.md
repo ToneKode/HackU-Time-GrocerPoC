@@ -1,3 +1,5 @@
+How the four modules call each other: [docs/how-the-backend-fits.md](docs/how-the-backend-fits.md).
+
 ```powershell
 Set-Location payment\backend
 py -3.13 -m pip install -r requirements.txt
