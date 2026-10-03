@@ -2,6 +2,7 @@
 // the real services exist. Products, reasons and thoughts come from the
 // contract examples; the policy follows cross_team_config.json's check order.
 import contract from '../../contract.json'
+import { products as catalogProducts } from '../data/catalog.js'
 import { sha256Hex, hashInput, genesis_prev_hash } from './hash.js'
 
 const { happy_path, halted_monthly, escalation_bulk } = contract.examples
@@ -79,10 +80,10 @@ function refresh(record) {
 
 const previews = new Map() // preview_id -> priced plan waiting for Confirm
 
-export async function sendIntent({ intent, monthly_spent = 0, escalation_id, preview, preview_id }) {
+export async function sendIntent({ intent, monthly_spent = 0, escalation_id, preview, preview_id, items }) {
   await wait(700)
   if (escalation_id) return resume(escalation_id)
-  if (preview_id) return confirmPreview(preview_id, Number(monthly_spent))
+  if (preview_id) return confirmPreview(preview_id, Number(monthly_spent), items)
 
   const example = /bulk|大包|批量/i.test(intent) ? escalation_bulk : happy_path
   const { product, quote, goal } = structuredClone(example.response)
@@ -100,13 +101,67 @@ export async function sendIntent({ intent, monthly_spent = 0, escalation_id, pre
   return decideAndPay(plan, Number(monthly_spent))
 }
 
-async function confirmPreview(previewId, monthlySpent) {
+async function confirmPreview(previewId, monthlySpent, items) {
   const saved = previews.get(previewId)
   previews.delete(previewId)
   if (!saved) {
     return { intent: '', status: 'FAILED', reply: 'This basket preview has expired. Please ask again.', audit_log: [], payment: null }
   }
+  if (items) {
+    const edited = reprice(items)
+    if (!edited) {
+      return { ...saved, status: 'FAILED', reply: 'Some items in the edited basket are no longer available. Please review it again.', payment: null }
+    }
+    Object.assign(saved, edited)
+    saved.audit_log = await appendEntries(saved.audit_log, [{
+      event: 'BASKET_REVISED',
+      status: 'RECORDED',
+      reason: `Shopper edited the basket before confirming. Landed HK$${edited.quote.total_landed_cost.toFixed(2)}.`,
+      thought: 'The shopper changed the basket. The policy check sees the edited lines and total.',
+    }])
+  }
   return decideAndPay(saved, monthlySpent)
+}
+
+// ---- Products for the "add a product" picker ----
+// The shop catalog at each product's cheapest store, plus the bulk item from the contract examples.
+function mockProducts() {
+  const list = catalogProducts.map((p) => {
+    const best = [...p.offers].filter((o) => o.inStock !== false).sort((a, b) => a.price - b.price)[0]
+    return best && {
+      id: p.id, name: p.name, price: best.price, currency: 'HKD', merchant: best.merchant,
+      category: p.category, stock: 50, image_url: '', sell_point: best.oldPrice ? 'cheap' : '',
+    }
+  }).filter(Boolean)
+  list.push(structuredClone(escalation_bulk.response.product))
+  return list
+}
+
+export async function listProducts() {
+  await wait(250)
+  return mockProducts()
+}
+
+// Same rules as the mall: HK$30 delivery under HK$400.
+function reprice(items) {
+  const byId = Object.fromEntries(mockProducts().map((p) => [p.id, p]))
+  const wanted = items.filter((i) => i.qty > 0)
+  if (!wanted.length || wanted.some((i) => !byId[i.sku])) return null
+  const lines = wanted.map((i, index) => {
+    const p = byId[i.sku]
+    return {
+      sku: p.id, name: p.name, merchant: p.merchant, category: p.category, sell_point: p.sell_point,
+      qty: i.qty, unit_price: p.price, line_total: round2(p.price * i.qty),
+      need: p.category, priority: index + 1, product_reason: 'Chosen in the basket review.', merchant_reason: '',
+    }
+  })
+  const subtotal = round2(lines.reduce((sum, l) => sum + l.line_total, 0))
+  const shipping = subtotal >= 400 ? 0 : 30
+  const quote = {
+    line_items: lines.map(({ sku, name, merchant, category, unit_price, qty, line_total }) => ({ sku, name, merchant, category, unit_price, qty, line_total })),
+    subtotal, shipping_fee: shipping, tax: 0, total_landed_cost: round2(subtotal + shipping), currency: 'HKD', free_shipping_threshold: 400,
+  }
+  return { lines, quote, product: byId[lines[0].sku] }
 }
 
 // Policy check, then pay / escalate / halt. Continues the plan's audit chain.

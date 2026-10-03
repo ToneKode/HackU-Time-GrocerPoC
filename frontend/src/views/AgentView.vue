@@ -97,13 +97,14 @@ function openReview(message) {
   reviewingId.value = message.id
 }
 
-function confirmBasket() {
+// items: the edited basket [{ sku, qty }], or null when the shopper kept the agent's basket.
+function confirmBasket(items) {
   const message = messages.value.find((m) => m.id === reviewingId.value)
   reviewingId.value = null
   if (!message || message.confirmed || busy.value) return
   message.confirmed = true
   push({ role: 'user', kind: 'text', text: t('basket.confirmedMessage') })
-  runAgent(message.request, undefined, { preview_id: message.plan.preview_id })
+  runAgent(message.request, undefined, { preview_id: message.plan.preview_id, items })
 }
 
 // ---- Polling the escalation every second while it is PENDING ----

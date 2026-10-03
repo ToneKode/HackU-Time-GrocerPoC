@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from basket import (
     _blacklist_reply,
     assign_same_merchant,
+    choose_payment,
     fit_basket,
     named_merchant,
     needs_for_every_category,
@@ -181,6 +182,20 @@ def _product(raw: dict) -> dict:
     }
 
 
+def _saved_items(saved: dict) -> list[dict]:
+    lines = saved.get("lines") or (saved.get("quote") or {}).get("line_items") or []
+    return [{"sku": line["sku"], "qty": line["qty"]} for line in lines]
+
+
+def _item_counts(items: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for item in items:
+        qty = int(item["qty"])
+        if qty > 0:
+            counts[str(item["sku"])] = counts.get(str(item["sku"]), 0) + qty
+    return counts
+
+
 def _quote(raw: dict) -> dict:
     lines = []
     for item in raw["line_items"]:
@@ -296,6 +311,7 @@ class ShoppingAgent:
         account_id: str | None = None,
         preview: bool = False,
         preview_id: str | None = None,
+        items: list[dict] | None = None,
     ) -> dict:
         account = (account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
         spent = self._resolve_monthly_spent(account, monthly_spent)
@@ -321,6 +337,18 @@ class ShoppingAgent:
                 ).model_dump()
             start.update(saved)
             start["confirmed"] = True
+            if items is not None and _item_counts(items) != _item_counts(_saved_items(saved)):
+                try:
+                    start.update(self._edited_basket(saved, items, spent))
+                except (LookupError, ValueError, KeyError):
+                    return ActionPlan.model_validate(
+                        {
+                            "intent": intent,
+                            "status": "FAILED",
+                            "reply": "Some items in the edited basket are no longer available. Please review it again.",
+                            "audit_log": saved.get("audit_log") or [],
+                        }
+                    ).model_dump()
         result = self.graph.invoke(start)
         plan = {
             "intent": result.get("intent", intent),
@@ -353,6 +381,55 @@ class ShoppingAgent:
         saved = {key: state[key] for key in PREVIEW_KEYS if key in state}
         self.previews[preview_id] = {"state": saved, "expires": now + PREVIEW_TTL_SECONDS}
         return preview_id
+
+    def catalog(self) -> list[dict]:
+        """Everything the shopper may add to a previewed basket."""
+        return [_product(raw) for raw in self._catalog()]
+
+    def _edited_basket(self, saved: dict, items: list[dict], monthly_spent: float) -> dict:
+        """The shopper removed, added or re-counted lines before confirming.
+        Re-price the exact list with the mall and judge it line by line, like a picked basket."""
+        wanted = [{"sku": str(i["sku"]), "qty": int(i["qty"])} for i in items if int(i["qty"]) > 0]
+        if not wanted:
+            raise ValueError("The edited basket is empty")
+        before = {line["sku"]: line for line in saved.get("lines") or []}
+        quote = _quote(self.mall.cart_lines(wanted))
+        lines = []
+        for index, item in enumerate(quote["line_items"], start=1):
+            product = self.mall.product(item["sku"])
+            kept = before.get(item["sku"])
+            lines.append(
+                {
+                    **item,
+                    "need": kept["need"] if kept else str(product["category"]).lower(),
+                    "priority": kept["priority"] if kept else index,
+                    "sell_point": product.get("sell_point") or "",
+                    "product_reason": kept["product_reason"] if kept else "Added by the shopper.",
+                    "merchant_reason": kept["merchant_reason"] if kept else "Chosen by the shopper.",
+                }
+            )
+        policy, events = self.policy.check_lines(lines, quote["total_landed_cost"], monthly_spent)
+        route, route_reason = choose_payment(lines)
+        names = ", ".join(f"{line['qty']} x {line['sku']}" for line in lines)
+        revised = {
+            "event": "BASKET_REVISED",
+            "status": "RECORDED",
+            "reason": f"Shopper edited the basket before confirming: {names}. Landed HK${quote['total_landed_cost']:.2f}.",
+            "thought": "The shopper changed the basket. The policy check sees the edited lines and total.",
+        }
+        return {
+            "needs": [{"query": line["need"]} for line in lines],
+            "lines": lines,
+            "quote": quote,
+            "product": _product(self.mall.product(lines[0]["sku"])),
+            "repairs": [],
+            "question": "",
+            "reply": "",
+            "basket_policy": policy,
+            "policy_events": [revised, *events],
+            "payment_route": route,
+            "payment_reason": route_reason,
+        }
 
     def _take_preview(self, preview_id: str) -> dict | None:
         record = self.previews.pop(preview_id, None)

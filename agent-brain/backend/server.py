@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse
 from agent_graph import ShoppingAgent
 from clients import MallClient, PolicyClient, SpendClient
 from fake_mall import FileMall
-from models import ActionPlan, IntentIn
+from models import ActionPlan, IntentIn, Product
 
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 HOME = """<!DOCTYPE html>
@@ -89,7 +89,7 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[FRONTEND_ORIGIN, "http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_methods=["POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
     if agent is None:
@@ -122,8 +122,14 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             account_id=body.account_id,
             preview=body.preview,
             preview_id=body.preview_id,
+            items=[item.model_dump() for item in body.items] if body.items is not None else None,
         )
         return ActionPlan.model_validate(plan)
+
+    @app.get("/agent/products", response_model=list[Product])
+    def agent_products() -> list[Product]:
+        # The shop's "add a product" picker. The frontend never calls the mall directly.
+        return [Product.model_validate(item) for item in shopping.catalog()]
 
     return app
 

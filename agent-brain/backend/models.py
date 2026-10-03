@@ -15,6 +15,11 @@ PolicyStatus = Literal["PASS", "ESCALATE", "HALT", "SKIPPED"]
 EscalationStatus = Literal["PENDING", "APPROVED", "REFUSED", "EXPIRED"]
 
 
+class ItemIn(BaseModel):
+    sku: str = Field(min_length=1)
+    qty: int = Field(ge=0, le=99)
+
+
 class IntentIn(BaseModel):
     intent: str = Field(min_length=1)
     monthly_spent: float = 0
@@ -24,6 +29,8 @@ class IntentIn(BaseModel):
     # preview_id: confirm that basket; the agent continues with the policy check and payment.
     preview: bool = False
     preview_id: str | None = None
+    # With preview_id: the basket as the shopper edited it. Omit to confirm the preview unchanged.
+    items: list[ItemIn] | None = None
 
 
 class Goal(BaseModel):

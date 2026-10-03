@@ -805,3 +805,81 @@ def test_basket_preview_then_confirm_pays() -> None:
     assert done["payment"]["charged"] == 79.8
     assert "POLICY_CHECK" in events(done)
     assert_chain(done["audit_log"])
+
+
+def _two_item_planner(intent: str, catalog: list[dict]) -> dict:
+    return {
+        "needs": [
+            {"query": "toilet paper", "qty": 1, "sell_point": "cheap", "priority": 1, "sku": "SKU001"},
+            {"query": "food container", "qty": 1, "sell_point": "cheap", "priority": 2, "sku": "SKU028"},
+        ],
+        "thought": "One roll and one box, two shops.",
+        "model": "scripted",
+    }
+
+
+def test_catalog_lists_every_product_for_the_picker() -> None:
+    api, _policy = client()
+    body = api.get("/agent/products").json()
+    assert len(body) == 30
+    assert {"id", "name", "price", "merchant", "category", "image_url", "sell_point"} <= set(body[0])
+
+
+def test_confirm_with_a_removed_line_pays_only_what_is_left() -> None:
+    api = TestClient(create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), _two_item_planner)))
+    preview = api.post("/agent/intent", json={"intent": "toilet paper and a box", "preview": True}).json()
+    assert preview["status"] == "READY"
+    done = api.post(
+        "/agent/intent",
+        json={"intent": "toilet paper and a box", "preview_id": preview["preview_id"], "items": [{"sku": "SKU001", "qty": 1}]},
+    ).json()
+    assert done["status"] == "COMPLETED"
+    assert [line["sku"] for line in done["lines"]] == ["SKU001"]
+    assert done["quote"]["total_landed_cost"] == 59.9
+    assert done["payment"]["charged"] == 59.9
+    assert "BASKET_REVISED" in events(done)
+    assert_chain(done["audit_log"])
+
+
+def test_confirm_with_an_added_product_turns_a_single_item_into_a_basket() -> None:
+    api, _policy = client()
+    preview = api.post("/agent/intent", json={"intent": "cheap toilet paper", "preview": True}).json()
+    done = api.post(
+        "/agent/intent",
+        json={
+            "intent": "cheap toilet paper",
+            "preview_id": preview["preview_id"],
+            "items": [{"sku": "SKU001", "qty": 2}, {"sku": "SKU028", "qty": 1}],
+        },
+    ).json()
+    assert done["status"] == "COMPLETED"
+    assert [(line["sku"], line["qty"]) for line in done["lines"]] == [("SKU001", 2), ("SKU028", 1)]
+    added = done["lines"][1]
+    assert added["product_reason"] == "Added by the shopper."
+    assert done["payment"]["charged"] == done["quote"]["total_landed_cost"]
+    assert events(done).count("POLICY_CHECK") == 3
+    assert_chain(done["audit_log"])
+
+
+def test_an_edit_over_the_cap_goes_to_approval() -> None:
+    api, _policy = client()
+    preview = api.post("/agent/intent", json={"intent": "cheap toilet paper", "preview": True}).json()
+    done = api.post(
+        "/agent/intent",
+        json={"intent": "cheap toilet paper", "preview_id": preview["preview_id"], "items": [{"sku": "SKU018", "qty": 2}]},
+    ).json()
+    assert done["status"] == "ESCALATED"
+    assert done["payment"] is None
+    assert done["escalation"]["amount"] == 560.0
+
+
+def test_an_empty_or_unknown_edit_does_not_pay() -> None:
+    api, _policy = client()
+    for items in ([{"sku": "SKU001", "qty": 0}], [{"sku": "NOPE", "qty": 1}]):
+        preview = api.post("/agent/intent", json={"intent": "cheap toilet paper", "preview": True}).json()
+        done = api.post(
+            "/agent/intent",
+            json={"intent": "cheap toilet paper", "preview_id": preview["preview_id"], "items": items},
+        ).json()
+        assert done["status"] == "FAILED"
+        assert done["payment"] is None
