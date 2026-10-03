@@ -5,7 +5,7 @@
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { money } from '../lib/format.js'
 import { categoryArt } from '../lib/productArt.js'
-import { storeName } from '../i18n/index.js'
+import { storeName, productName, isEnglish } from '../i18n/index.js'
 import MerchantLogo from './shop/MerchantLogo.vue'
 import QtyStepper from './shop/QtyStepper.vue'
 import ProductPicker from './ProductPicker.vue'
@@ -166,7 +166,7 @@ onBeforeUnmount(() => {
               <img v-if="item.image" :src="item.image" :alt="item.name" loading="lazy" />
               <span v-else class="basket-emoji" aria-hidden="true">{{ categoryArt(item.category).emoji }}</span>
               <span v-if="item.added" class="basket-added">{{ $t('basket.added') }}</span>
-              <button type="button" class="basket-remove" :aria-label="$t('basket.remove', { name: item.name })" @click="remove(item)">
+              <button type="button" class="basket-remove" :aria-label="$t('basket.remove', { name: productName({ id: item.sku, name: item.name }) })" @click="remove(item)">
                 <Icon :icon="Delete02Icon" :size="18" />
               </button>
             </div>
@@ -175,11 +175,12 @@ onBeforeUnmount(() => {
               <span>{{ storeName(item.merchant) }}</span>
             </div>
             <!-- Product names come from the mall: plain text only. -->
-            <h3 class="basket-name">{{ item.name }}</h3>
+            <h3 class="basket-name">{{ productName({ id: item.sku, name: item.name }) }}</h3>
             <span v-if="item.sellPoint && $te(`basket.sellPoint.${item.sellPoint}`)" class="basket-badge">
               {{ $t(`basket.sellPoint.${item.sellPoint}`) }}
             </span>
-            <p v-if="item.reason" class="basket-reason">{{ item.reason }}</p>
+            <!-- The agent writes reasons in English; in Chinese the sell-point badge says the same. -->
+            <p v-if="item.reason && isEnglish()" class="basket-reason">{{ item.reason }}</p>
             <button type="button" class="link-btn basket-swap" @click="openPicker(item)">
               <Icon :icon="ArrowDataTransferHorizontalIcon" :size="16" /> {{ $t('basket.alternatives') }}
             </button>

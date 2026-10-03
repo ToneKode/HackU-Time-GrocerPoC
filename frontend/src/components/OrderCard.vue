@@ -11,7 +11,7 @@ defineProps({ plan: { type: Object, required: true } })
     <!-- Product names are untrusted plain text: always {{ }}, never v-html. -->
     <ul v-if="plan.lines?.length" class="basket-lines">
       <li v-for="line in plan.lines" :key="line.sku">
-        {{ line.name }}
+        {{ productName({ id: line.sku, name: line.name }) }}
         <span class="muted"> · {{ storeName(line.merchant) }} · ×{{ line.qty }} · {{ money(line.line_total) }}</span>
       </li>
     </ul>

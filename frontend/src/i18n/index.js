@@ -4,7 +4,8 @@ import { createI18n } from 'vue-i18n'
 import en from './en.js'
 import zhHant from './zh-Hant.js'
 import zhHans from './zh-Hans.js'
-import productsZh, { storeNamesZh, policyReasonsZh } from './products.js'
+import productsZh, { storeNamesZh, policyReasonsZh, mallNamesZh } from './products.js'
+import { productById } from '../data/catalog.js'
 
 export const LOCALES = [
   { code: 'en', label: 'English', date: 'en-HK' },
@@ -50,15 +51,23 @@ const zhIndex = () => (locale.value === 'zh-Hant' ? 0 : locale.value === 'zh-Han
 
 export const dateLocale = () => LOCALES.find((l) => l.code === locale.value)?.date ?? 'en-HK'
 
+// Shop translations are keyed by SKU, but the agent's mall reuses SKU ids for other products,
+// so an id only counts when the English name matches the shop's product too.
+const isShopProduct = (product) => !product.name || productById[product.id]?.name === product.name
+
 export function productName(product) {
   const i = zhIndex()
-  return (i >= 0 && productsZh[product.id]?.name[i]) || product.name
+  if (i < 0) return product.name
+  if (isShopProduct(product) && productsZh[product.id]) return productsZh[product.id].name[i]
+  return mallNamesZh[product.name]?.[i] ?? product.name
 }
 
 export function productSize(product) {
   const i = zhIndex()
-  return (i >= 0 && productsZh[product.id]?.size?.[i]) || product.size
+  return (i >= 0 && isShopProduct(product) && productsZh[product.id]?.size?.[i]) || product.size
 }
+
+export const isEnglish = () => locale.value === 'en'
 
 export function storeName(name) {
   const i = zhIndex()

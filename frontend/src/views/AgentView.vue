@@ -22,7 +22,7 @@ import {
   ShoppingBasket01Icon, CheckmarkCircle02Icon,
 } from '@hugeicons/core-free-icons'
 
-const { t, tm, rt } = useI18n()
+const { t, tm, rt, getLocaleMessage } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
@@ -56,7 +56,11 @@ function replace(target, message) {
 // ---- Composer ----
 const draft = ref('')
 const input = ref(null)
-const suggestions = computed(() => tm('agentChat.suggestions').map((s) => rt(s)))
+// Chips show in the shopper's language; the agent gets the English wording (same order in every locale).
+const englishSuggestions = (getLocaleMessage('en').agentChat?.suggestions ?? []).map((s) => (typeof s === 'string' ? s : rt(s)))
+const suggestions = computed(() =>
+  tm('agentChat.suggestions').map((s, i) => ({ label: rt(s), intent: englishSuggestions[i] ?? rt(s) })),
+)
 
 function autosize() {
   const el = input.value
@@ -75,17 +79,19 @@ function onKeydown(event) {
 onMounted(() => {
   const intent = String(route.query.intent || '').trim()
   if (!intent) return
+  const label = String(route.query.label || '').trim()
   router.replace({ name: 'agent' })
-  send(intent)
+  send(intent, label)
 })
 
-function send(text = draft.value) {
+// label: what the chat bubble shows when it differs from the text sent to the agent.
+function send(text = draft.value, label = '') {
   const intent = text.trim()
   if (!intent || busy.value) return
   draft.value = ''
   nextTick(autosize)
   const request = { intent, monthly_spent: Number(monthlySpent.value) || 0 }
-  push({ role: 'user', kind: 'text', text: intent })
+  push({ role: 'user', kind: 'text', text: label || intent })
   runAgent(request, undefined, { preview: true })
 }
 
@@ -208,7 +214,9 @@ function summary(plan) {
     case 'HALTED':
       return t('agentChat.halted', { reason: policyReason(plan.policy?.reason ?? '') })
     case 'FAILED':
-      return t('agentChat.failed', { error: plan.payment?.error ?? '' })
+      if (plan.payment?.error) return t('agentChat.failed', { error: plan.payment.error })
+      if (plan.audit_log?.some((e) => /no product matched/i.test(e.reason))) return t('agentChat.notFound')
+      return t('agentChat.couldNotFinish')
     case 'ABORTED':
       return t('agentChat.refused')
     case 'NEEDS_INPUT':
@@ -323,7 +331,7 @@ const userInitial = computed(() => (session.user?.name?.charAt(0) || t('agentCha
       <!-- Composer -->
       <form class="composer" @submit.prevent="send()">
         <div v-if="!messages.length" class="composer-suggestions">
-          <button v-for="s in suggestions" :key="s" type="button" class="store-chip" :disabled="busy" @click="send(s)">{{ s }}</button>
+          <button v-for="s in suggestions" :key="s.label" type="button" class="store-chip" :disabled="busy" @click="send(s.intent, s.label)">{{ s.label }}</button>
         </div>
         <div class="composer-box">
           <textarea

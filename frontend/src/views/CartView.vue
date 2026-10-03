@@ -9,7 +9,8 @@ import MerchantChips from '../components/shop/MerchantChips.vue'
 import MerchantLogo from '../components/shop/MerchantLogo.vue'
 import QtyStepper from '../components/shop/QtyStepper.vue'
 import Icon from '../components/shop/Icon.vue'
-import { productName, storeName } from '../i18n/index.js'
+import { productName, storeName, listOf } from '../i18n/index.js'
+import { useI18n } from 'vue-i18n'
 import {
   ArrowLeft01Icon, ShoppingCart01Icon, FlashIcon, Store01Icon, ArrowDownRight01Icon, Delete02Icon,
   ArrowDown01Icon, ArrowUp01Icon, AiMagicIcon,
@@ -24,12 +25,20 @@ const mix = computed(() => optimalMix(cartLines.value, allowed.value))
 const stores = computed(() => singleStoreTotals(cartLines.value, allowed.value))
 const savings = computed(() => mixSavings(mix.value, stores.value))
 
+const { t } = useI18n()
+
+// The agent gets the request in English (product names as the mall knows them);
+// the chat bubble shows the same request in the shopper's language.
 function checkoutWithAgent() {
-  const parts = cartLines.value.map((line) => `${line.qty} ${line.product.name}`)
-  if (!parts.length) return
-  let intent = `buy ${parts.join(' and ')}`
-  if (mode.value === 'single' && openStore.value) intent += ` from ${openStore.value}`
-  router.push({ name: 'agent', query: { intent } })
+  const lines = cartLines.value
+  if (!lines.length) return
+  let intent = `buy ${lines.map((line) => `${line.qty} ${line.product.name}`).join(' and ')}`
+  let label = t('cart.agentRequest', { items: listOf(lines.map((line) => `${line.qty} × ${productName(line.product)}`)) })
+  if (mode.value === 'single' && openStore.value) {
+    intent += ` from ${openStore.value}`
+    label += ` (${storeName(openStore.value)})`
+  }
+  router.push({ name: 'agent', query: { intent, label } })
 }
 </script>
 

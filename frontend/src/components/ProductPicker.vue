@@ -5,7 +5,7 @@ import { ref, computed, watch, nextTick } from 'vue'
 import * as api from '../lib/api.js'
 import { money } from '../lib/format.js'
 import { categoryArt, categoryKey } from '../lib/productArt.js'
-import { storeName } from '../i18n/index.js'
+import { storeName, productName } from '../i18n/index.js'
 import MerchantLogo from './shop/MerchantLogo.vue'
 import Icon from './shop/Icon.vue'
 import { Cancel01Icon, Search01Icon, PlusSignIcon, ArrowDataTransferHorizontalIcon, SearchRemoveIcon } from '@hugeicons/core-free-icons'
@@ -50,11 +50,11 @@ const results = computed(() => {
     (p) =>
       (!category.value || p.category === category.value) &&
       (!store.value || p.merchant === store.value) &&
-      (!q || `${p.name} ${p.merchant} ${p.category}`.toLowerCase().includes(q)),
+      (!q || `${p.name} ${productName(p)} ${p.merchant} ${storeName(p.merchant)} ${p.category}`.toLowerCase().includes(q)),
   )
   if (sort.value === 'cheap') list.sort((a, b) => a.price - b.price)
   if (sort.value === 'expensive') list.sort((a, b) => b.price - a.price)
-  if (sort.value === 'name') list.sort((a, b) => a.name.localeCompare(b.name))
+  if (sort.value === 'name') list.sort((a, b) => productName(a).localeCompare(productName(b)))
   return list
 })
 
@@ -98,7 +98,7 @@ function onKey(event) {
             <h2 id="picker-title">
               {{ replacing ? $t('picker.alternativesTitle') : $t('picker.addTitle') }}
             </h2>
-            <p v-if="replacing" class="muted small picker-sub">{{ $t('picker.replacing', { name: replacing.name }) }}</p>
+            <p v-if="replacing" class="muted small picker-sub">{{ $t('picker.replacing', { name: productName({ id: replacing.sku, name: replacing.name }) }) }}</p>
           </div>
           <button type="button" class="basket-close" :aria-label="$t('basket.close')" @click="emit('close')">
             <Icon :icon="Cancel01Icon" :size="20" />
@@ -150,7 +150,7 @@ function onKey(event) {
           <ul v-else class="picker-grid">
             <li v-for="p in results" :key="p.id" class="picker-item" :class="{ current: replacing && replacing.sku === p.id }">
               <div class="basket-img" :style="{ background: categoryArt(p.category).tint }">
-                <img v-if="p.image_url" :src="p.image_url" :alt="p.name" loading="lazy" />
+                <img v-if="p.image_url" :src="p.image_url" :alt="productName(p)" loading="lazy" />
                 <span v-else class="basket-emoji" aria-hidden="true">{{ categoryArt(p.category).emoji }}</span>
                 <span v-if="inBasket[p.id]" class="basket-qty">{{ $t('picker.inBasket', { n: inBasket[p.id] }) }}</span>
               </div>
@@ -159,7 +159,7 @@ function onKey(event) {
                 <span>{{ storeName(p.merchant) }}</span>
               </div>
               <!-- Product names come from the mall: plain text only. -->
-              <h3 class="basket-name">{{ p.name }}</h3>
+              <h3 class="basket-name">{{ productName(p) }}</h3>
               <span v-if="p.sell_point && $te(`basket.sellPoint.${p.sell_point}`)" class="basket-badge">
                 {{ $t(`basket.sellPoint.${p.sell_point}`) }}
               </span>

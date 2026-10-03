@@ -34,14 +34,14 @@ const verified = computed(
       <li v-for="(entry, i) in sorted" :key="entry.index" :class="{ broken: checks[i] === false }">
         <div class="trace-top">
           <span class="trace-event">{{ $te(`agentCards.events.${entry.event}`) ? $t(`agentCards.events.${entry.event}`) : entry.event }}</span>
-          <span class="pill small">{{ entry.status }}</span>
+          <span class="pill small">{{ $te(`agentCards.status.${entry.status}`) ? $t(`agentCards.status.${entry.status}`) : entry.status }}</span>
           <span class="muted mono">{{ entry.ts }}</span>
         </div>
         <p class="thought">{{ entry.thought }}</p>
         <p class="muted">{{ entry.reason }}</p>
         <p class="hashes mono muted">
-          <span :title="entry.prev_hash">prev {{ shortHash(entry.prev_hash) }}</span>
-          <span :title="entry.hash">hash {{ shortHash(entry.hash) }}</span>
+          <span :title="entry.prev_hash">{{ $t('agentCards.prev') }} {{ shortHash(entry.prev_hash) }}</span>
+          <span :title="entry.hash">{{ $t('agentCards.hash') }} {{ shortHash(entry.hash) }}</span>
         </p>
       </li>
     </ol>

@@ -2,7 +2,6 @@
 const zh = {
   SKU001: { name: ['Tempo 超柔軟衛生紙 27卷', 'Tempo 超柔软卫生纸 27卷'], size: ['27卷', '27卷'] },
   SKU002: { name: ['唯潔雅 衛生紙 10卷', '唯洁雅 卫生纸 10卷'], size: ['10卷', '10卷'] },
-  SKU003: { name: ['舒潔 衛生紙 30卷 大包裝', '舒洁 卫生纸 30卷 大包装'], size: ['30卷', '30卷'] },
   SKU004: { name: ['滴露 多用途表面清潔劑 1L', '滴露 多用途表面清洁剂 1L'] },
   TG001: { name: ['超細纖維清潔布 10件', '超细纤维清洁布 10件'], size: ['10件', '10件'] },
   TG002: { name: ['可疊加收納箱套裝 3件', '可叠加收纳箱套装 3件'], size: ['3件', '3件'] },
@@ -28,6 +27,41 @@ const zh = {
   TG021: { name: ['美素佳兒 金裝 3號奶粉 900g', '美素佳儿 金装 3段奶粉 900g'] },
   TG022: { name: ['必理痛 特效 20粒', '必理痛 特效 20粒'], size: ['20粒', '20粒'] },
   TG023: { name: ['維他命C 1000mg 100粒', '维生素C 1000mg 100粒'], size: ['100粒', '100粒'] },
+}
+
+// The agent's mall reuses SKU ids for different products, so its names are keyed by English name.
+export const mallNamesZh = {
+  'Kleenex Toilet Paper 30 Rolls Bulk': ['舒潔 衛生紙 30卷 大包裝', '舒洁 卫生纸 30卷 大包装'],
+  'Tempo Value Toilet Paper 10 Rolls': ['Tempo 超值衛生紙 10卷', 'Tempo 超值卫生纸 10卷'],
+  'Virjoy Everyday Toilet Paper 27 Rolls': ['唯潔雅 日常衛生紙 27卷', '唯洁雅 日常卫生纸 27卷'],
+  'Kleenex Ultra Soft Toilet Paper 30 Rolls': ['舒潔 超柔軟衛生紙 30卷', '舒洁 超柔软卫生纸 30卷'],
+  'Golden Lion White Rice 5kg': ['金獅 白米 5kg', '金狮 白米 5kg'],
+  'Golden Elephant Jasmine Rice 5kg': ['金象 茉莉香米 5kg', '金象 茉莉香米 5kg'],
+  'Akita Komachi Rice 2kg': ['秋田小町米 2kg', '秋田小町米 2kg'],
+  'Watsons Distilled Water 6 Pack': ['屈臣氏 蒸餾水 6支裝', '屈臣氏 蒸馏水 6瓶装'],
+  'Bonaqua Mineral Water 12 Pack': ['飛雪 礦物質水 12支裝', '飞雪 矿物质水 12瓶装'],
+  'Evian Mineral Water 6 Pack': ['依雲 天然礦泉水 6支裝', '依云 天然矿泉水 6瓶装'],
+  'Calbee Light Potato Chips 40g': ['卡樂B 輕怡薯片 40g', '卡乐B 轻怡薯片 40g'],
+  'Lays Classic Potato Chips 70g': ['樂事 原味薯片 70g', '乐事 原味薯片 70g'],
+  'Kettle Ridge Potato Chips 150g': ['Kettle 波浪薯片 150g', 'Kettle 波浪薯片 150g'],
+  'Watsons Surgical Mask 50pcs': ['屈臣氏 外科口罩 50個', '屈臣氏 外科口罩 50片'],
+  'TempPro Daily Surgical Mask 50pcs': ['TempPro 日常外科口罩 50個', 'TempPro 日常外科口罩 50片'],
+  '3M Aura Respirator Mask 10pcs': ['3M Aura 防護口罩 10個', '3M Aura 防护口罩 10片'],
+  'Pantene Daily Shampoo 400ml': ['潘婷 日常洗髮露 400ml', '潘婷 日常洗发露 400ml'],
+  'Head Shoulders Shampoo 750ml': ['海倫仙度絲 洗髮露 750ml', '海飞丝 洗发露 750ml'],
+  'Oribe Gold Lust Shampoo 250ml': ['Oribe 金緻洗髮露 250ml', 'Oribe 金致洗发露 250ml'],
+  'BabyLove Diapers Size M 30pcs': ['BabyLove 紙尿片 中碼 30片', 'BabyLove 纸尿裤 中号 30片'],
+  'Pampers Baby Dry Diapers Size M 52pcs': ['幫寶適 乾爽紙尿片 中碼 52片', '帮宝适 干爽纸尿裤 中号 52片'],
+  'Merries Diapers Size M 46pcs': ['妙而舒 紙尿片 中碼 46片', '妙而舒 纸尿裤 中号 46片'],
+  'Pedigree Dry Dog Food 1.5kg': ['寶路 乾狗糧 1.5kg', '宝路 干狗粮 1.5kg'],
+  'Royal Canin Dry Dog Food 2kg': ['皇家 乾狗糧 2kg', '皇家 干狗粮 2kg'],
+  'Orijen Dry Dog Food 2kg': ['Orijen 乾狗糧 2kg', '渴望 干狗粮 2kg'],
+  'Baseus Wired Earbuds': ['倍思 有線耳機', '倍思 有线耳机'],
+  'Redmi Buds Earbuds': ['紅米 Redmi Buds 耳機', '红米 Redmi Buds 耳机'],
+  'Sony WF Earbuds': ['Sony WF 耳機', '索尼 WF 耳机'],
+  'LocknLock Value Food Container 550ml': ['樂扣樂扣 超值保鮮盒 550ml', '乐扣乐扣 超值保鲜盒 550ml'],
+  'Sistema Everyday Food Container 1L': ['Sistema 日常保鮮盒 1L', 'Sistema 日常保鲜盒 1L'],
+  'Zwilling Glass Food Container 1.2L': ['雙立人 玻璃保鮮盒 1.2L', '双立人 玻璃保鲜盒 1.2L'],
 }
 
 export const storeNamesZh = {
