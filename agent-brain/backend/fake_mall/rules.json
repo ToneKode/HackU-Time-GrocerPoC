@@ -1,0 +1,9 @@
+{
+  "currency": "HKD",
+  "free_shipping_threshold": 400,
+  "shipping_fee_below_threshold": 30,
+  "tax": 0,
+  "decline_cart_total": 666.0,
+  "decline_error": "card_declined",
+  "default_payment_route": "mastercard"
+}
