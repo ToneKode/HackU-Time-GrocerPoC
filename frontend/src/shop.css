@@ -648,54 +648,60 @@ button { font: inherit; color: inherit; }
 
 /* =========================================================
    Hover / press / focus states for buttons and controls
+   Colour only: buttons change colour on hover and deepen while pressed (no lift, no shadow).
    ========================================================= */
 .btn-primary, .btn-soft, .auth-btn, .add-btn, .store-chip, .category-pill, .tabs button,
-.segmented button, .stepper button, .fav, .store-row, .menu-close, .about-contact,
-.btn, .link-btn, .side-item, .nav-link, .icon-btn, .menu-btn, .menu-row, .menu-logout, .auth-eye, .auth-back {
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease,
-    box-shadow 0.15s ease, transform 0.15s ease, filter 0.15s ease;
+.segmented button, .stepper button, .fav, .store-row, .menu-close, .about-contact, .composer-send,
+.btn, .link-btn, .side-item, .nav-link, .icon-btn, .menu-btn, .menu-row, .menu-logout, .auth-eye, .auth-back,
+.basket-close, .basket-remove, .chat-head-btn {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .product-emoji { transition: transform 0.25s ease; }
 
 /* Hover only where a real pointer exists, so taps on phones don't leave "stuck" hover colours. */
 @media (hover: hover) {
-  /* Filled buttons: a touch darker and lifted */
+  /* Filled buttons: a darker shade */
   .btn-primary:not(:disabled):hover, .auth-login:hover, .btn.primary:not(:disabled):hover {
-    background: color-mix(in srgb, var(--primary) 86%, #000);
-    box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 32%, transparent);
-    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--primary) 85%, #000);
   }
   .btn-soft:not(:disabled):hover, .auth-register:hover, .about-contact:hover {
-    background: color-mix(in srgb, var(--primary-soft) 82%, var(--primary));
-    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--primary-soft) 80%, var(--primary));
   }
   .btn.danger:not(:disabled):hover { background: color-mix(in srgb, var(--bad-soft) 80%, var(--bad)); }
   .btn.ghost:not(:disabled):hover, .btn:not(.primary):not(.danger):not(:disabled):hover { background: var(--surface-2); }
 
-  /* Chips, pills, rows: tint */
+  /* Chips, pills, rows: a tint */
   .store-chip:not(.on):hover { background: var(--surface-2); border-color: color-mix(in srgb, var(--primary) 35%, var(--line)); }
-  .store-chip.on:hover { background: color-mix(in srgb, var(--primary-soft) 82%, var(--primary)); }
-  .category-pill:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgb(20 40 80 / 0.1); }
+  .store-chip.on:hover { background: color-mix(in srgb, var(--primary-soft) 80%, var(--primary)); }
+  /* Category pills keep their own pastel colour; an overlay darkens it in light and dark mode. */
+  .category-pill:hover { box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--text) 7%, transparent); }
   .tabs button:not(.on):hover { background: var(--surface); color: var(--text); }
-  .tabs button.on:hover { background: color-mix(in srgb, var(--primary) 88%, #000); }
+  .tabs button.on:hover { background: color-mix(in srgb, var(--primary) 85%, #000); }
   .segmented button:not(.on):hover { color: var(--text); background: color-mix(in srgb, var(--surface) 60%, transparent); }
   .store-row:hover { background: var(--surface-2); }
   .menu-close:hover { background: var(--line); }
 
   /* Small controls */
   .stepper button:hover { background: var(--primary); color: var(--primary-ink); }
-  .fav:hover { transform: scale(1.1); color: var(--heart); }
+  .fav:hover { color: var(--heart); background: color-mix(in srgb, var(--heart) 12%, var(--surface)); }
   .link-btn:not(:disabled):hover { text-decoration: underline; text-underline-offset: 3px; }
   .legal-toc a:hover, .auth-switch a:hover, .auth-check a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-  /* Product cards: picture zooms a little */
+  /* Product cards (not a button): the picture zooms a little */
   .product:hover .product-emoji { transform: scale(1.07); }
 }
 
-/* Press feedback */
-.btn-primary:not(:disabled):active, .btn-soft:not(:disabled):active, .auth-btn:active, .add-btn:not(:disabled):active,
-.btn:not(:disabled):active, .category-pill:active, .about-contact:active { transform: translateY(0) scale(0.98); box-shadow: none; }
-.stepper button:active, .fav:active { transform: scale(0.92); }
+/* Press feedback: the colour deepens a step further */
+.btn-primary:not(:disabled):active, .auth-login:active, .btn.primary:not(:disabled):active,
+.tabs button.on:active, .stepper button:active, .composer-send:not(:disabled):active {
+  background: color-mix(in srgb, var(--primary) 72%, #000);
+  color: var(--primary-ink);
+}
+.btn-soft:not(:disabled):active, .auth-register:active, .about-contact:active, .add-btn:not(:disabled):active,
+.store-chip:active {
+  background: color-mix(in srgb, var(--primary-soft) 65%, var(--primary));
+}
+.category-pill:active { box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--text) 12%, transparent); }
 
 /* Keyboard focus ring (mouse clicks don't show it) */
 :is(button, a, select, [tabindex]):focus-visible {
@@ -704,14 +710,8 @@ button { font: inherit; color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .btn-primary, .btn-soft, .auth-btn, .add-btn, .store-chip, .category-pill, .fav, .about-contact, .btn, .product-emoji {
-    transition: none;
-  }
-  .btn-primary:hover, .btn-soft:hover, .auth-btn:hover, .category-pill:hover, .about-contact:hover,
-  .fav:hover, .product:hover .product-emoji, .btn-primary:active, .btn-soft:active, .auth-btn:active,
-  .add-btn:active, .btn:active, .category-pill:active, .about-contact:active, .stepper button:active, .fav:active {
-    transform: none;
-  }
+  .product-emoji { transition: none; }
+  .product:hover .product-emoji { transform: none; }
 }
 
 /* ---------- Input focus: same look everywhere (blue border + soft glow) ---------- */
