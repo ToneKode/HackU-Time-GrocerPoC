@@ -1,4 +1,10 @@
 ```powershell
+Set-Location payment\backend
+py -3.13 -m pip install -r requirements.txt
+py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8004
+```
+
+```powershell
 Set-Location persistance
 docker compose up -d
 # Postgres :5432 · Redis :6379 · Persistance API :8003
