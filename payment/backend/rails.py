@@ -52,18 +52,33 @@ def charge_remote(
     amount: float,
     rail: str,
     idempotency_key: str,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    with httpx.Client(base_url=base_url.rstrip("/"), timeout=5.0) as client:
-        response = client.post(
-            "/pay",
-            json={
-                "cart_total": round(float(amount), 2),
-                "payment_route": rail,
-                "idempotency_key": idempotency_key,
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
+    own_client = client is None
+    client = client or httpx.Client(base_url=base_url.rstrip("/"), timeout=5.0)
+    try:
+        return _charge_remote(client, amount, rail, idempotency_key)
+    finally:
+        if own_client:
+            client.close()
+
+
+def _charge_remote(
+    client: httpx.Client,
+    amount: float,
+    rail: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    response = client.post(
+        "/pay",
+        json={
+            "cart_total": round(float(amount), 2),
+            "payment_route": rail,
+            "idempotency_key": idempotency_key,
+        },
+    )
+    response.raise_for_status()
+    body = response.json()
     return {
         "success": bool(body.get("success")),
         "error": body.get("error"),

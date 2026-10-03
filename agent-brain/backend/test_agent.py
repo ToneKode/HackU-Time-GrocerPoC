@@ -174,7 +174,8 @@ def test_cheap_toilet_paper_passes_and_pays() -> None:
     assert body["policy"]["monthly_remaining"] == 1940.1
     assert body["escalation"] is None
     assert body["payment"]["success"] is True
-    assert body["payment"]["charged"] == 59.9
+    assert body["payment"]["charged"] == 59.3
+    assert body["payment"]["discount"] == 0.6
     assert "reward_points_earned" not in body["payment"]
     assert events(body) == [
         "INTENT_RECEIVED",
@@ -234,7 +235,7 @@ def test_best_rated_earbuds_escalate_and_everyday_rice_pays() -> None:
     assert rice["goal"]["sell_point"] == "highest_usage"
     assert rice["quote"]["total_landed_cost"] == 98.0
     assert rice["policy"]["status"] == "PASS"
-    assert rice["payment"]["charged"] == 98.0
+    assert rice["payment"]["charged"] == 97.02
 
 
 def test_shampoo_escalates_then_pays_when_approved() -> None:
@@ -260,7 +261,7 @@ def test_shampoo_escalates_then_pays_when_approved() -> None:
     ).json()
     assert resumed["status"] == "COMPLETED"
     assert resumed["payment"]["success"] is True
-    assert resumed["payment"]["charged"] == 560.0
+    assert resumed["payment"]["charged"] == 554.4
     assert events(resumed) == ["PAYMENT"]
     assert_chain(resumed["audit_log"])
 
@@ -440,7 +441,7 @@ def test_two_merchants_pass_policy_and_pay() -> None:
     assert body["lines"][0]["merchant_reason"]
     assert body["quote"]["total_landed_cost"] == 79.8
     assert body["policy"]["status"] == "PASS"
-    assert body["payment"]["charged"] == 79.8
+    assert body["payment"]["charged"] == 79.0
     assert body["payment_route"]
     assert body["question"] == ""
     assert [entry["event"] for entry in body["audit_log"]].count("POLICY_CHECK") >= 3
@@ -610,7 +611,7 @@ def test_named_shop_is_kept_when_it_covers_less() -> None:
     assert {line["merchant"] for line in body["lines"]} == {"Watsons"}
     assert [line["sku"] for line in body["lines"]] == ["SKU001", "SKU007", "SKU013", "SKU016", "SKU021"]
     assert body["quote"]["total_landed_cost"] == 259.8
-    assert body["payment"]["charged"] == 259.8
+    assert body["payment"]["charged"] == 257.2
     assert "You asked for Watsons" in body["reply"]
     assert "does not stock" in body["reply"]
     assert_chain(body["audit_log"])
@@ -675,6 +676,62 @@ def test_llm_react_is_shown_before_the_tool_steps() -> None:
     assert body["react"][1]["source"] == "llm"
     assert any(step["action"] == "POLICY_CHECK" and step["source"] == "agent" for step in body["react"])
     assert_chain(body["audit_log"])
+
+
+def test_payment_service_holds_a_draft_until_authorize() -> None:
+    class FakePayments:
+        def __init__(self) -> None:
+            self.authorized = []
+
+        def draft(self, **kwargs):
+            return {
+                "payment_id": "pay_hold",
+                "status": "DRAFT",
+                "amount": kwargs["amount"],
+                "currency": "HKD",
+                "rail": kwargs.get("rail") or "mastercard",
+                "merchant": kwargs["merchant"],
+                "risk_score": 5,
+                "step_up_required": False,
+                "step_up_reason": "",
+                "recommendation": {"rail": "mastercard", "rank": 1},
+            }
+
+        def authorize(self, payment_id, idempotency_key=None, step_up_confirmed=False):
+            self.authorized.append((payment_id, step_up_confirmed))
+            return {
+                "status": "CAPTURED",
+                "payment_id": payment_id,
+                "order_id": "ORD-held",
+                "charged": 59.3,
+                "currency": "HKD",
+                "rail": "mastercard",
+                "rail_ts": "2026-10-03T00:00:00Z",
+                "error": None,
+            }
+
+    payments = FakePayments()
+    api = TestClient(
+        create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), scripted, payments=payments))
+    )
+    draft = api.post("/agent/intent", json={"intent": "cheap toilet paper"}).json()
+    assert draft["status"] == "READY"
+    assert draft["payment"] is None
+    assert draft["payment_draft"]["payment_id"] == "pay_hold"
+    assert draft["payment_draft"]["rail"] == "mastercard"
+    assert draft["payment_draft"]["step_up_required"] is False
+    assert events(draft)[-1] == "PAYMENT"
+    assert draft["audit_log"][-1]["status"] == "DRAFT"
+    assert payments.authorized == []
+
+    paid = api.post(
+        "/agent/payment/authorize",
+        json={"payment_id": "pay_hold", "step_up_confirmed": False},
+    ).json()
+    assert paid["success"] is True
+    assert paid["order_id"] == "ORD-held"
+    assert paid["charged"] == 59.3
+    assert payments.authorized == [("pay_hold", False)]
 
 
 def test_team_contract_covers_both_readers() -> None:

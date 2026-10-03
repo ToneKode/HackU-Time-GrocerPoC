@@ -23,6 +23,8 @@ from data_loader import MerchantsPayload, Product, load_merchants, load_products
 
 FREE_SHIPPING_THRESHOLD = 400.0
 SHIPPING_FEE_BELOW_THRESHOLD = 30.0
+# Cashback rates match payment/backend/recommender.py. Unknown routes get no discount.
+RAIL_CASHBACK = {"mastercard": 0.01, "unionpay": 0.015}
 
 
 class CartItemIn(BaseModel):
@@ -33,6 +35,7 @@ class CartItemIn(BaseModel):
 class CartRequest(BaseModel):
     items: list[CartItemIn]
     merchant: str | None = None
+    payment_route: str | None = None
 
 
 class LineItem(BaseModel):
@@ -53,6 +56,10 @@ class CartResponse(BaseModel):
     total_landed_cost: float
     currency: str
     free_shipping_threshold: float
+    payment_route: str | None = None
+    discount: float = 0.0
+    discount_reason: str = ""
+    total_before_discount: float = 0.0
 
 
 class PayRequest(BaseModel):
@@ -80,6 +87,19 @@ idempotency_store: dict[str, PayResponse] = {}
 
 def _money(value: float) -> float:
     return round(float(value), 2)
+
+
+def route_discount(landed: float, payment_route: str | None) -> tuple[float, float, str]:
+    """Return discount, reduced total, and a short reason. No route leaves the total unchanged."""
+    landed = _money(landed)
+    route = (payment_route or "").strip()
+    rate = RAIL_CASHBACK.get(route.casefold(), 0.0)
+    if not route or rate <= 0:
+        reason = "" if not route else f"No cashback for route {route}."
+        return 0.0, landed, reason
+    discount = _money(landed * rate)
+    reduced = _money(landed - discount)
+    return discount, reduced, f"{route} cashback {rate * 100:.1f}% (HK${discount:.2f})."
 
 
 app = FastAPI(title="HacKU Time-Grocer Mock API", version="0.1.0")
@@ -158,14 +178,20 @@ def create_cart(body: CartRequest) -> CartResponse:
     subtotal = _money(sum(li.line_total for li in line_items))
     shipping = 0.0 if subtotal >= FREE_SHIPPING_THRESHOLD else SHIPPING_FEE_BELOW_THRESHOLD
     tax = 0.0
+    before = _money(subtotal + shipping + tax)
+    discount, reduced, reason = route_discount(before, body.payment_route)
     return CartResponse(
         line_items=line_items,
         subtotal=subtotal,
         shipping_fee=_money(shipping),
         tax=_money(tax),
-        total_landed_cost=_money(subtotal + shipping + tax),
+        total_landed_cost=reduced,
         currency="HKD",
         free_shipping_threshold=FREE_SHIPPING_THRESHOLD,
+        payment_route=body.payment_route,
+        discount=discount,
+        discount_reason=reason,
+        total_before_discount=before,
     )
 
 

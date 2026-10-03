@@ -20,6 +20,10 @@ Use this doc to continue (frontend rail UI, risk step-up, refund evidence).
 | Agent `PaymentClient` | `agent-brain/backend/clients.py` |
 | Agent `_pay` → draft+authorize | `agent_graph.py` (mall.pay fallback if :8004 down) |
 | Postgres payment records | `persistance/backend/schema.sql` (`002_payments`), `payment/backend/pg_store.py` |
+| Risk score + step-up | `payment/backend/risk.py` (HK$400+ flags MFA; policy HK$500 gate is unchanged) |
+| Evidence pack | `GET /payment/{id}/evidence` |
+| Mall rail discount | `POST /cart` `payment_route` → reduced `total_landed_cost` |
+| Agent holds the draft | `POST /agent/intent` returns `payment_draft` when :8004 is up; `POST /agent/payment/authorize` captures |
 
 ### State machine
 `DRAFT → AUTHORIZED → CAPTURED` (auto-capture on success) · `FAILED` · `REFUNDED`
@@ -40,11 +44,8 @@ Payment is a **controlled process**: scoped token, rail recommend, authorize/cap
 
 ## Next-chat backlog
 
-1. Risk score → step-up MFA flag (beyond existing >HK$500 escalate)
-2. Refund UI + dispute evidence pack export
-3. Frontend: show recommended rail + draft before execute
-4. Apply `payment_route` discount into mall cart totals (Person 4)
-5. Optional: set `MOCK_ACQUIRER_URL=http://127.0.0.1:8000` to charge via real mock mall
+1. Frontend refund screen (the refund API and `GET /payment/{id}/evidence` already exist)
+2. Frontend: show `payment_draft` (rail, amount, step-up flag) and call `POST /agent/payment/authorize`
 
 ## Ports
 

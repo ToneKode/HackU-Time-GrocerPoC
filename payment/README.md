@@ -28,10 +28,11 @@ is down, or set it empty, and the API keeps the in-memory store. An explicit
 | GET | `/health` | ok + `store` (`postgres` or `memory`) |
 | POST | `/payment/recommend` | Rank mastercard / unionpay by net benefit |
 | POST | `/payment/draft` | Freeze amount + mint one-time scoped token |
-| POST | `/payment/authorize` | Consume token; call rail (or mock mall `/pay`) |
+| POST | `/payment/authorize` | Consume token; call rail (or mock mall `/pay`). Body `step_up_confirmed` when the draft requires it |
 | POST | `/payment/{id}/capture` | Mark captured (idempotent) |
 | POST | `/payment/{id}/refund` | Compensating action |
 | GET | `/payment/{id}` | Status + evidence |
+| GET | `/payment/{id}/evidence` | Dispute pack. Omits the JWT |
 
 ## State machine
 

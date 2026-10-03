@@ -16,11 +16,12 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 from agent_graph import ShoppingAgent
 from clients import MallClient, PaymentClient, PolicyClient, SpendClient
 from fake_mall import FileMall
-from models import ActionPlan, IntentIn
+from models import ActionPlan, IntentIn, PayResult
 
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 HOME = """<!DOCTYPE html>
@@ -46,6 +47,12 @@ def load_env(path: Path) -> None:
 
 
 load_env(Path(__file__).resolve().parent / ".env")
+
+
+class ConfirmPaymentIn(BaseModel):
+    payment_id: str = Field(min_length=1)
+    step_up_confirmed: bool = False
+    account_id: str | None = None
 
 
 def _scripted_planner(intent: str, catalog: list[dict]) -> dict:
@@ -125,6 +132,16 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             account_id=body.account_id,
         )
         return ActionPlan.model_validate(plan)
+
+    @app.post("/agent/payment/authorize", response_model=PayResult)
+    def agent_authorize(body: ConfirmPaymentIn) -> PayResult:
+        account = (body.account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        result = shopping.authorize_draft(
+            body.payment_id,
+            step_up_confirmed=body.step_up_confirmed,
+            account_id=account,
+        )
+        return PayResult.model_validate(result)
 
     return app
 

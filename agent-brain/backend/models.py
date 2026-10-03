@@ -85,6 +85,22 @@ class PayResult(BaseModel):
     payment_route: str | None
     ts: str | None
     error: str | None
+    discount: float | None = None
+    total_before_discount: float | None = None
+    payment_id: str | None = None
+
+
+class PaymentDraft(BaseModel):
+    payment_id: str
+    status: str = "DRAFT"
+    amount: float
+    currency: str = "HKD"
+    rail: str = ""
+    merchant: str = ""
+    risk_score: int = 0
+    step_up_required: bool = False
+    step_up_reason: str = ""
+    recommendation: dict | None = None
 
 
 class Escalation(BaseModel):
@@ -151,6 +167,7 @@ class ActionPlan(BaseModel):
     policy: PolicyResult | None = None
     escalation: Escalation | None = None
     payment: PayResult | None = None
+    payment_draft: PaymentDraft | None = None
     lines: list[BasketLine] = Field(default_factory=list)
     repairs: list[BasketRepair] = Field(default_factory=list)
     payment_route: str = ""
