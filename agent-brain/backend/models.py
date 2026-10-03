@@ -19,6 +19,7 @@ class IntentIn(BaseModel):
     intent: str = Field(min_length=1)
     monthly_spent: float = 0
     escalation_id: str | None = None
+    account_id: str | None = None
 
 
 class Goal(BaseModel):

@@ -1,0 +1,70 @@
+# HacKU Time-Grocer — durable stores
+# Postgres: hash-chained audit ledger + monthly spend
+# Redis: escalation TTL clock (esc:live / esc:meta / esc:decision)
+#
+#   cd persistance && docker compose up -d
+#   cd backend && pip install -r requirements.txt && python migrate.py && uvicorn main:app --port 8003
+
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tg
+      POSTGRES_PASSWORD: tg
+      POSTGRES_DB: time_grocer
+    ports:
+      - "5432:5432"
+    volumes:
+      - tg_postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tg -d time_grocer"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - tg_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Optional: run the persistence API next to the stores.
+  # Policy (8001) can also connect straight to postgres/redis via DATABASE_URL / REDIS_URL.
+  persistance-api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: postgresql://tg:tg@postgres:5432/time_grocer
+      REDIS_URL: redis://redis:6379/0
+      PERSISTANCE_PORT: "8003"
+      DEMO_MODE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  tg_postgres_data:
+  tg_redis_data:

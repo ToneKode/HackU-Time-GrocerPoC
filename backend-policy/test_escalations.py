@@ -89,7 +89,9 @@ def test_redis_failure_returns_json_503(c, monkeypatch):
 
 def test_health_reports_redis(c):
     body = c.get("/health").json()
-    assert body["ok"] is True and body["redis"] is True and body["store"] == "fakeredis"
+    assert body["ok"] is True and body["redis"] is True
+    assert body["store"]["escalations"] == "fakeredis"
+    assert body["store"]["audit"] == "jsonl"
 
 
 def test_unknown_escalation_404(c):
