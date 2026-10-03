@@ -1,0 +1,651 @@
+{
+  "for": "person_3",
+  "from": "person_1",
+  "currency": "HKD",
+  "frontend_origin": "http://localhost:5173",
+  "examples_are": "The ActionPlan shape to render. Tool calls are not live yet.",
+  "ignored": [
+    "reward_points",
+    "use_reward_points",
+    "cashback"
+  ],
+  "product_name_is_plain_text": true,
+  "calls": {
+    "start_or_resume": {
+      "method": "POST",
+      "url": "http://localhost:8002/agent/intent",
+      "body": {
+        "intent": "string",
+        "monthly_spent": "number",
+        "escalation_id": "string, omit on a new purchase"
+      },
+      "returns": "ActionPlan",
+      "do_not_send": [
+        "escalation_status"
+      ]
+    },
+    "read_escalation": {
+      "method": "GET",
+      "url": "http://localhost:8001/escalations/{escalation_id}",
+      "returns": "Escalation",
+      "poll_every_seconds": 1,
+      "poll_while": "escalation.status == PENDING"
+    },
+    "decide": {
+      "method": "POST",
+      "url": "http://localhost:8001/escalations/{escalation_id}/decision",
+      "body": {
+        "decision": "APPROVE|REFUSE"
+      },
+      "returns": "Escalation"
+    },
+    "read_audit_log": {
+      "method": "GET",
+      "url": "http://localhost:8001/audit_log",
+      "returns": "AuditEntry[]"
+    }
+  },
+  "do_not_call": [
+    "GET /products",
+    "POST /cart",
+    "POST /pay",
+    "POST /check_policy",
+    "POST /log_event",
+    "POST /create_escalation"
+  ],
+  "labels": {
+    "plan_status": {
+      "READY": "Ready",
+      "COMPLETED": "Order placed",
+      "HALTED": "Halted",
+      "ESCALATED": "Needs your approval",
+      "ABORTED": "Purchase cancelled",
+      "FAILED": "Payment failed"
+    },
+    "escalation_status": {
+      "PENDING": "Waiting",
+      "APPROVED": "Approved",
+      "REFUSED": "Refused",
+      "EXPIRED": "Expired"
+    },
+    "event": {
+      "INTENT_RECEIVED": "Intent",
+      "PLAN": "Plan",
+      "SEARCH": "Search",
+      "CART_PRICED": "Cart",
+      "POLICY_CHECK": "Policy",
+      "ESCALATION_CREATED": "Escalation",
+      "ESCALATION_APPROVED": "Approved",
+      "ESCALATION_REFUSED": "Refused",
+      "ESCALATION_EXPIRED": "Expired",
+      "PAYMENT": "Payment",
+      "HALTED": "Halted"
+    }
+  },
+  "active_rules": [
+    {
+      "id": "per_transaction_cap",
+      "label": "Per-transaction auto cap",
+      "display": "HK$500",
+      "amount": 500
+    },
+    {
+      "id": "bulk_ceiling",
+      "label": "Bulk approval ceiling",
+      "display": "HK$800",
+      "amount": 800
+    },
+    {
+      "id": "monthly_cap",
+      "label": "Monthly cap",
+      "display": "HK$2,000",
+      "amount": 2000
+    },
+    {
+      "id": "escalation_ttl",
+      "label": "Approval time",
+      "display": "10:00",
+      "seconds": 600
+    },
+    {
+      "id": "whitelist",
+      "label": "Whitelisted merchants",
+      "merchants": [
+        "Watsons",
+        "HKTVmall",
+        "PARKnSHOP",
+        "Japan Home Centre"
+      ]
+    },
+    {
+      "id": "blacklist",
+      "label": "Blacklisted merchants",
+      "merchants": [
+        "DarkWebMart"
+      ]
+    }
+  ],
+  "comparison": {
+    "manual": {
+      "label": "Manual HKTV Checkout",
+      "steps": 15,
+      "duration_seconds": 240,
+      "duration_display": "4 min"
+    },
+    "agent": {
+      "label": "Agent Checkout",
+      "steps": 1,
+      "duration_seconds": 10,
+      "duration_display": "10 sec"
+    }
+  },
+  "money": {
+    "currency": "HKD",
+    "decimals": 2,
+    "prefix": "HK$"
+  },
+  "countdown": {
+    "source": "escalation.remaining_seconds",
+    "format": "M:SS",
+    "start_display": "10:00",
+    "end_display": "0:00",
+    "ttl_seconds": 600
+  },
+  "screens": {
+    "dashboard": {
+      "budget_cap": "policy.monthly_cap",
+      "budget_spent": "policy.monthly_spent",
+      "budget_remaining": "policy.monthly_remaining",
+      "remaining_when_pass_or_escalate": "monthly_cap - monthly_spent - amount",
+      "remaining_when_halt": "monthly_cap - monthly_spent",
+      "rules": "active_rules",
+      "audit": "audit_log"
+    },
+    "status": {
+      "source": "status",
+      "copy": "labels.plan_status"
+    },
+    "order": {
+      "show_when": "status == COMPLETED",
+      "order_id": "payment.order_id",
+      "charged": "payment.charged",
+      "merchant": "product.merchant",
+      "product_name": "product.name"
+    },
+    "approval": {
+      "show_when": "status == ESCALATED",
+      "amount": "escalation.amount",
+      "merchant": "escalation.merchant",
+      "reason": "escalation.reason",
+      "timer": "escalation.remaining_seconds",
+      "buttons": [
+        {
+          "label": "Approve",
+          "decision": "APPROVE"
+        },
+        {
+          "label": "Refuse",
+          "decision": "REFUSE"
+        }
+      ],
+      "buttons_enabled_when": "escalation.status == PENDING and escalation.remaining_seconds > 0",
+      "after_approve": "POST /agent/intent with the same intent, monthly_spent, and escalation_id",
+      "after_refuse": "Show Purchase cancelled. Do not call the agent.",
+      "after_expire": "Show Purchase cancelled. Do not call the agent."
+    },
+    "trace": {
+      "source": "audit_log",
+      "order": "index ascending",
+      "show": [
+        "thought",
+        "event",
+        "status",
+        "reason",
+        "ts",
+        "hash",
+        "prev_hash"
+      ]
+    },
+    "comparison": "comparison"
+  },
+  "audit": {
+    "algorithm": "sha256",
+    "encoding": "hex",
+    "hash_fields_in_order": [
+      "index",
+      "ts",
+      "event",
+      "status",
+      "reason",
+      "prev_hash"
+    ],
+    "hash_join": "|",
+    "genesis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "types": {
+    "ActionPlan": {
+      "intent": "string",
+      "status": "READY|COMPLETED|HALTED|ESCALATED|ABORTED|FAILED",
+      "goal": {
+        "intent": "string",
+        "query": "string",
+        "qty": "number"
+      },
+      "product": "Product|null",
+      "quote": "CartQuote|null",
+      "policy": "PolicyResult|null",
+      "escalation": "Escalation|null",
+      "payment": "PayResult|null",
+      "audit_log": "AuditEntry[]"
+    },
+    "AuditEntry": {
+      "index": "number",
+      "ts": "string",
+      "event": "string",
+      "status": "string",
+      "reason": "string",
+      "thought": "string",
+      "prev_hash": "string",
+      "hash": "string"
+    },
+    "Escalation": {
+      "escalation_id": "string",
+      "status": "PENDING|APPROVED|REFUSED|EXPIRED",
+      "ttl_seconds": 600,
+      "expires_at": "string",
+      "remaining_seconds": "number",
+      "amount": "number",
+      "currency": "HKD",
+      "merchant": "string",
+      "sku": "string",
+      "reason": "string"
+    },
+    "PayResult": {
+      "success": "boolean",
+      "order_id": "string|null",
+      "charged": "number|null",
+      "currency": "HKD|null",
+      "payment_route": "mastercard|unionpay|null",
+      "ts": "string|null",
+      "error": "string|null"
+    }
+  },
+  "examples": {
+    "happy_path": {
+      "request": {
+        "intent": "Buy toilet paper",
+        "monthly_spent": 0
+      },
+      "response": {
+        "intent": "Buy toilet paper",
+        "status": "COMPLETED",
+        "goal": {
+          "intent": "Buy toilet paper",
+          "query": "toilet",
+          "qty": 1
+        },
+        "product": {
+          "id": "SKU001",
+          "name": "Tempo Ultra Soft Toilet Paper 27 Rolls",
+          "price": 89.9,
+          "currency": "HKD",
+          "merchant": "Watsons",
+          "category": "Household",
+          "stock": 42,
+          "image_url": ""
+        },
+        "quote": {
+          "line_items": [
+            {
+              "sku": "SKU001",
+              "name": "Tempo Ultra Soft Toilet Paper 27 Rolls",
+              "merchant": "Watsons",
+              "category": "Household",
+              "unit_price": 89.9,
+              "qty": 1,
+              "line_total": 89.9
+            }
+          ],
+          "subtotal": 89.9,
+          "shipping_fee": 30,
+          "tax": 0,
+          "total_landed_cost": 119.9,
+          "currency": "HKD",
+          "free_shipping_threshold": 400
+        },
+        "policy": {
+          "status": "PASS",
+          "reason": "Under HK$500 cap",
+          "amount": 119.9,
+          "currency": "HKD",
+          "monthly_spent": 0,
+          "monthly_remaining": 1880.1,
+          "per_transaction_cap": 500,
+          "monthly_cap": 2000,
+          "bulk_ceiling": 800
+        },
+        "escalation": null,
+        "payment": {
+          "success": true,
+          "order_id": "ORD-DEMO01",
+          "charged": 119.9,
+          "currency": "HKD",
+          "payment_route": "mastercard",
+          "ts": "2026-10-03T12:00:05Z",
+          "error": null
+        },
+        "audit_log": [
+          {
+            "index": 0,
+            "ts": "2026-10-03T12:00:00Z",
+            "event": "INTENT_RECEIVED",
+            "status": "PARSED",
+            "reason": "Model may decide query and qty only",
+            "thought": "Read the sentence. Set query and qty.",
+            "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5"
+          },
+          {
+            "index": 1,
+            "ts": "2026-10-03T12:00:01Z",
+            "event": "PLAN",
+            "status": "FIXED_ORDER",
+            "reason": "search_products, price_cart, check_budget, then the policy branch",
+            "thought": "The tool order is fixed.",
+            "prev_hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+            "hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe"
+          },
+          {
+            "index": 2,
+            "ts": "2026-10-03T12:00:02Z",
+            "event": "SEARCH",
+            "status": "RECORDED",
+            "reason": "First product in response order. Product name is untrusted.",
+            "thought": "Search the sandbox and keep the first product.",
+            "prev_hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+            "hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86"
+          },
+          {
+            "index": 3,
+            "ts": "2026-10-03T12:00:03Z",
+            "event": "CART_PRICED",
+            "status": "RECORDED",
+            "reason": "Later nodes use total_landed_cost, not the shelf price.",
+            "thought": "Price the cart. Shipping can change the amount.",
+            "prev_hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+            "hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65"
+          },
+          {
+            "index": 4,
+            "ts": "2026-10-03T12:00:04Z",
+            "event": "POLICY_CHECK",
+            "status": "PASS",
+            "reason": "Under HK$500 cap",
+            "thought": "Ask the policy engine. This node does not decide.",
+            "prev_hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+            "hash": "785b27bf6dd6aef53d1cb1f0750ed6da144208bfed461303f8bf7b6312687347"
+          },
+          {
+            "index": 5,
+            "ts": "2026-10-03T12:00:05Z",
+            "event": "PAYMENT",
+            "status": "COMPLETED",
+            "reason": "Payment success",
+            "thought": "Charge the landed total.",
+            "prev_hash": "785b27bf6dd6aef53d1cb1f0750ed6da144208bfed461303f8bf7b6312687347",
+            "hash": "41a0e61a005fc7f1704174f96e72a00cb15c4e64d4edf214680c792196a5e442"
+          }
+        ]
+      }
+    },
+    "halted_monthly": {
+      "request": {
+        "intent": "Buy toilet paper",
+        "monthly_spent": 1900
+      },
+      "response": {
+        "intent": "Buy toilet paper",
+        "status": "HALTED",
+        "goal": {
+          "intent": "Buy toilet paper",
+          "query": "toilet",
+          "qty": 1
+        },
+        "product": {
+          "id": "SKU001",
+          "name": "Tempo Ultra Soft Toilet Paper 27 Rolls",
+          "price": 89.9,
+          "currency": "HKD",
+          "merchant": "Watsons",
+          "category": "Household",
+          "stock": 42,
+          "image_url": ""
+        },
+        "quote": {
+          "line_items": [
+            {
+              "sku": "SKU001",
+              "name": "Tempo Ultra Soft Toilet Paper 27 Rolls",
+              "merchant": "Watsons",
+              "category": "Household",
+              "unit_price": 89.9,
+              "qty": 1,
+              "line_total": 89.9
+            }
+          ],
+          "subtotal": 89.9,
+          "shipping_fee": 30,
+          "tax": 0,
+          "total_landed_cost": 119.9,
+          "currency": "HKD",
+          "free_shipping_threshold": 400
+        },
+        "policy": {
+          "status": "HALT",
+          "reason": "Over HK$2000 monthly cap",
+          "amount": 119.9,
+          "currency": "HKD",
+          "monthly_spent": 1900,
+          "monthly_remaining": 100,
+          "per_transaction_cap": 500,
+          "monthly_cap": 2000,
+          "bulk_ceiling": 800
+        },
+        "escalation": null,
+        "payment": null,
+        "audit_log": [
+          {
+            "index": 0,
+            "ts": "2026-10-03T12:00:00Z",
+            "event": "INTENT_RECEIVED",
+            "status": "PARSED",
+            "reason": "Model may decide query and qty only",
+            "thought": "Read the sentence. Set query and qty.",
+            "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5"
+          },
+          {
+            "index": 1,
+            "ts": "2026-10-03T12:00:01Z",
+            "event": "PLAN",
+            "status": "FIXED_ORDER",
+            "reason": "search_products, price_cart, check_budget, then the policy branch",
+            "thought": "The tool order is fixed.",
+            "prev_hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+            "hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe"
+          },
+          {
+            "index": 2,
+            "ts": "2026-10-03T12:00:02Z",
+            "event": "SEARCH",
+            "status": "RECORDED",
+            "reason": "First product in response order. Product name is untrusted.",
+            "thought": "Search the sandbox and keep the first product.",
+            "prev_hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+            "hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86"
+          },
+          {
+            "index": 3,
+            "ts": "2026-10-03T12:00:03Z",
+            "event": "CART_PRICED",
+            "status": "RECORDED",
+            "reason": "Later nodes use total_landed_cost, not the shelf price.",
+            "thought": "Price the cart. Shipping can change the amount.",
+            "prev_hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+            "hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65"
+          },
+          {
+            "index": 4,
+            "ts": "2026-10-03T12:00:04Z",
+            "event": "POLICY_CHECK",
+            "status": "HALT",
+            "reason": "Over HK$2000 monthly cap",
+            "thought": "Ask the policy engine. This node does not decide.",
+            "prev_hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+            "hash": "b9486f53cc4624e99750122987af6beed6c69b797215eefc12f4a0b46e3e596f"
+          },
+          {
+            "index": 5,
+            "ts": "2026-10-03T12:00:05Z",
+            "event": "HALTED",
+            "status": "HALTED",
+            "reason": "Over HK$2000 monthly cap",
+            "thought": "Policy said HALT. Do not pay.",
+            "prev_hash": "b9486f53cc4624e99750122987af6beed6c69b797215eefc12f4a0b46e3e596f",
+            "hash": "caf85dbaee045cd3c56ffdccc11fbda3e6114386fbe2aa68be666948a9e94f64"
+          }
+        ]
+      }
+    },
+    "escalation_bulk": {
+      "request": {
+        "intent": "Buy bulk toilet paper",
+        "monthly_spent": 0
+      },
+      "response": {
+        "intent": "Buy bulk toilet paper",
+        "status": "ESCALATED",
+        "goal": {
+          "intent": "Buy bulk toilet paper",
+          "query": "bulk",
+          "qty": 1
+        },
+        "product": {
+          "id": "SKU003",
+          "name": "Kleenex Toilet Paper 30 Rolls Bulk",
+          "price": 799.0,
+          "currency": "HKD",
+          "merchant": "PARKnSHOP",
+          "category": "Household",
+          "stock": 15,
+          "image_url": ""
+        },
+        "quote": {
+          "line_items": [
+            {
+              "sku": "SKU003",
+              "name": "Kleenex Toilet Paper 30 Rolls Bulk",
+              "merchant": "PARKnSHOP",
+              "category": "Household",
+              "unit_price": 799.0,
+              "qty": 1,
+              "line_total": 799.0
+            }
+          ],
+          "subtotal": 799.0,
+          "shipping_fee": 0,
+          "tax": 0,
+          "total_landed_cost": 799.0,
+          "currency": "HKD",
+          "free_shipping_threshold": 400
+        },
+        "policy": {
+          "status": "ESCALATE",
+          "reason": "Over HK$500 per-transaction cap",
+          "amount": 799.0,
+          "currency": "HKD",
+          "monthly_spent": 0,
+          "monthly_remaining": 1201.0,
+          "per_transaction_cap": 500,
+          "monthly_cap": 2000,
+          "bulk_ceiling": 800
+        },
+        "escalation": {
+          "escalation_id": "esc_demo",
+          "status": "PENDING",
+          "ttl_seconds": 600,
+          "expires_at": "2026-10-03T12:10:05Z",
+          "remaining_seconds": 600,
+          "amount": 799.0,
+          "currency": "HKD",
+          "merchant": "PARKnSHOP",
+          "sku": "SKU003",
+          "reason": "Over HK$500 per-transaction cap"
+        },
+        "payment": null,
+        "audit_log": [
+          {
+            "index": 0,
+            "ts": "2026-10-03T12:00:00Z",
+            "event": "INTENT_RECEIVED",
+            "status": "PARSED",
+            "reason": "Model may decide query and qty only",
+            "thought": "Read the sentence. Set query and qty.",
+            "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5"
+          },
+          {
+            "index": 1,
+            "ts": "2026-10-03T12:00:01Z",
+            "event": "PLAN",
+            "status": "FIXED_ORDER",
+            "reason": "search_products, price_cart, check_budget, then the policy branch",
+            "thought": "The tool order is fixed.",
+            "prev_hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+            "hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe"
+          },
+          {
+            "index": 2,
+            "ts": "2026-10-03T12:00:02Z",
+            "event": "SEARCH",
+            "status": "RECORDED",
+            "reason": "First product in response order. Product name is untrusted.",
+            "thought": "Search the sandbox and keep the first product.",
+            "prev_hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+            "hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86"
+          },
+          {
+            "index": 3,
+            "ts": "2026-10-03T12:00:03Z",
+            "event": "CART_PRICED",
+            "status": "RECORDED",
+            "reason": "Later nodes use total_landed_cost, not the shelf price.",
+            "thought": "Price the cart. Shipping can change the amount.",
+            "prev_hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+            "hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65"
+          },
+          {
+            "index": 4,
+            "ts": "2026-10-03T12:00:04Z",
+            "event": "POLICY_CHECK",
+            "status": "ESCALATE",
+            "reason": "Over HK$500 per-transaction cap",
+            "thought": "Ask the policy engine. This node does not decide.",
+            "prev_hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+            "hash": "4c19f31b68481cc7a2f7880a87b4df43a22c5a5daa8fc39effaa5e67083353b9"
+          },
+          {
+            "index": 5,
+            "ts": "2026-10-03T12:00:05Z",
+            "event": "ESCALATION_CREATED",
+            "status": "PENDING",
+            "reason": "Over HK$500 per-transaction cap",
+            "thought": "Open the 10-minute approval and return now.",
+            "prev_hash": "4c19f31b68481cc7a2f7880a87b4df43a22c5a5daa8fc39effaa5e67083353b9",
+            "hash": "c1741965cb16df318d519a31d35b7921fe4387a3e45c2f34666d67a9128273d0"
+          }
+        ]
+      }
+    }
+  }
+}

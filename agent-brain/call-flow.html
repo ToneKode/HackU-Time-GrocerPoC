@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One shopping call</title>
+<style>
+  :root {
+    --paper: #f4efe6;
+    --ink: #1a1714;
+    --muted: #6a6258;
+    --card: #fffdf8;
+    --line: #1a1714;
+    --user: #1e3a5f;
+    --agent: #3c342b;
+    --mall: #1b5e45;
+    --policy: #8e2e2a;
+    --pay: #1b5e45;
+    --ask: #8a5a12;
+    --halt: #6b2d3c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--paper); }
+  body {
+    width: 1180px;
+    padding: 44px 52px 48px;
+    color: var(--ink);
+    font-family: "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 24px;
+    margin-bottom: 28px;
+    padding-bottom: 18px;
+    border-bottom: 2px solid var(--ink);
+  }
+  h1 {
+    margin: 0;
+    font-size: 42px;
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    font-weight: 750;
+  }
+  h1 span { display: block; font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 650; color: var(--muted); margin-bottom: 8px; }
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; max-width: 460px; }
+  .tag {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 5px 8px;
+    border: 1.5px solid var(--ink);
+    background: var(--card);
+  }
+  .tag i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+  .rail { list-style: none; margin: 0; padding: 0 0 0 36px; position: relative; }
+  .rail::before {
+    content: "";
+    position: absolute;
+    left: 10px;
+    top: 18px;
+    bottom: 18px;
+    width: 3px;
+    background: var(--ink);
+  }
+  .rail > li { position: relative; margin: 0 0 12px; }
+  .dot {
+    position: absolute;
+    left: -33px;
+    top: 18px;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    background: var(--paper);
+    border: 3px solid var(--ink);
+    z-index: 1;
+  }
+  .card {
+    background: var(--card);
+    border: 1.5px solid var(--ink);
+    padding: 12px 16px 13px;
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    column-gap: 14px;
+    align-items: start;
+  }
+  .who {
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding-top: 3px;
+  }
+  .fn {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+  }
+  .meta { margin-top: 3px; color: var(--muted); font-size: 13px; line-height: 1.35; }
+  .meta b { color: var(--ink); font-weight: 650; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12.5px;
+    line-height: 1.3;
+    background: #f3efe6;
+    border: 1px solid #d9d1c3;
+    padding: 4px 7px;
+  }
+  .user .who, .user .dot { color: var(--user); border-color: var(--user); }
+  .agent .who { color: var(--agent); }
+  .mall .who, .mall .dot { color: var(--mall); border-color: var(--mall); }
+  .policy .who, .policy .dot { color: var(--policy); border-color: var(--policy); }
+  .pay .who, .pay .dot { color: var(--pay); border-color: var(--pay); }
+  .ask .who, .ask .dot { color: var(--ask); border-color: var(--ask); }
+  .halt .who, .halt .dot { color: var(--halt); border-color: var(--halt); }
+  .split {
+    margin: 8px 0 18px 36px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .branch {
+    border: 1.5px solid var(--ink);
+    background: var(--card);
+    padding: 12px 14px 14px;
+    min-height: 148px;
+  }
+  .branch h2 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .branch p { margin: 0 0 6px; font-family: Consolas, monospace; font-size: 13.5px; line-height: 1.45; }
+  .branch .end { color: var(--muted); font-family: "Segoe UI", sans-serif; font-size: 13px; margin-top: 8px; }
+  .pass { box-shadow: inset 4px 0 0 var(--pay); }
+  .esc { box-shadow: inset 4px 0 0 var(--ask); }
+  .haltb { box-shadow: inset 4px 0 0 var(--halt); }
+  .askb { box-shadow: inset 4px 0 0 var(--ask); }
+  .call2 {
+    margin-top: 6px;
+    border: 2px solid var(--ink);
+    background: #fff8ec;
+    padding: 16px 18px 8px;
+  }
+  .call2 h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.03em; }
+  .call2 .lead { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+  .stops {
+    margin-top: 16px;
+    border-top: 1.5px solid var(--ink);
+    padding-top: 12px;
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 8px 16px;
+    font-size: 13.5px;
+  }
+  .stops b { font-family: Consolas, monospace; font-size: 13px; }
+  .stops span { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>HacKU Time-Grocer · person 1</span>One shopping call</h1>
+  <div class="legend">
+    <div class="tag"><i style="background:#1e3a5f"></i>User</div>
+    <div class="tag"><i style="background:#3c342b"></i>Agent</div>
+    <div class="tag"><i style="background:#1b5e45"></i>Mall</div>
+    <div class="tag"><i style="background:#8e2e2a"></i>Policy</div>
+    <div class="tag"><i style="background:#8a5a12"></i>Approval</div>
+  </div>
+</header>
+
+<ol class="rail">
+  <li class="user">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">User</div>
+      <div>
+        <div class="fn">ask()</div>
+        <div class="meta">frontend/index.html · <b>POST /agent/intent</b></div>
+      </div>
+    </div>
+  </li>
+  <li class="agent">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Agent</div>
+      <div>
+        <div class="fn">agent_intent → ShoppingAgent.run</div>
+        <div class="meta">server.py · agent_graph.py · graph.invoke</div>
+      </div>
+    </div>
+  </li>
+  <li class="agent">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Agent</div>
+      <div>
+        <div class="fn">_route_entry → _choose_entry → reason</div>
+        <div class="meta">No escalation_id on a new sentence. Resume paths are call 2.</div>
+      </div>
+    </div>
+  </li>
+  <li class="agent">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Agent</div>
+      <div>
+        <div class="fn">_reason</div>
+        <div class="chips">
+          <span class="chip">_catalog</span>
+          <span class="chip">FileMall.search · or list_products</span>
+          <span class="chip">needs_for_every_category</span>
+          <span class="chip">plan_fuzzy</span>
+          <span class="chip">OpenRouterPlanner.__call__</span>
+          <span class="chip">needs_from</span>
+          <span class="chip">assign_same_merchant</span>
+          <span class="chip">resolve_pick</span>
+          <span class="chip">goal_from</span>
+        </div>
+      </div>
+    </div>
+  </li>
+  <li class="policy">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Policy</div>
+      <div>
+        <div class="fn">audit_intent → _stamp → log_event</div>
+        <div class="meta">POST /log_event · AuditLog.append</div>
+      </div>
+    </div>
+  </li>
+  <li class="agent">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Agent</div>
+      <div>
+        <div class="fn">_plan → audit_plan</div>
+        <div class="meta">Fixed order: search, cart, budget, then the policy branch</div>
+      </div>
+    </div>
+  </li>
+  <li class="mall">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Mall</div>
+      <div>
+        <div class="fn">_search → product · or get_product</div>
+        <div class="meta">FileMall.product · MallClient.product → GET /products/{sku}</div>
+      </div>
+    </div>
+  </li>
+  <li class="mall">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Mall</div>
+      <div>
+        <div class="fn">_cart → cart · or create_cart</div>
+        <div class="meta">One item: FileMall.cart / POST /cart. Basket: _price_basket</div>
+        <div class="chips">
+          <span class="chip">fit_basket</span>
+          <span class="chip">options_for</span>
+          <span class="chip">cart_lines</span>
+          <span class="chip">check_lines</span>
+          <span class="chip">policy_engine.evaluate</span>
+          <span class="chip">choose_payment</span>
+        </div>
+      </div>
+    </div>
+  </li>
+  <li class="policy">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Policy</div>
+      <div>
+        <div class="fn">_budget → PolicyClient.check → evaluate</div>
+        <div class="meta">POST /check_policy · main.py check_policy · policy_engine.evaluate. Offline fallback: policy_rules.decide. Basket reuses basket_policy from check_lines.</div>
+      </div>
+    </div>
+  </li>
+  <li class="policy">
+    <div class="dot"></div>
+    <div class="card">
+      <div class="who">Policy</div>
+      <div>
+        <div class="fn">audit_policy → _after_policy</div>
+        <div class="meta">PASS · ESCALATE · HALT · or a question</div>
+      </div>
+    </div>
+  </li>
+</ol>
+
+<div class="split">
+  <div class="branch pass">
+    <h2 style="color:#1b5e45">PASS · pay now</h2>
+    <p>_pay</p>
+    <p>FileMall.pay</p>
+    <p>MallClient.pay → POST /pay → pay</p>
+    <p>audit_payment → log_event</p>
+    <div class="end">Status COMPLETED</div>
+  </div>
+  <div class="branch esc">
+    <h2 style="color:#8a5a12">ESCALATE · wait</h2>
+    <p>_escalate</p>
+    <p>PolicyClient.create_escalation</p>
+    <p>POST /create_escalation</p>
+    <p>EscalationStore.create</p>
+    <div class="end">Status ESCALATED · payment null</div>
+  </div>
+  <div class="branch haltb">
+    <h2 style="color:#6b2d3c">HALT</h2>
+    <p>_halt</p>
+    <p>audit_halt → log_event</p>
+    <div class="end">No payment</div>
+  </div>
+  <div class="branch askb">
+    <h2 style="color:#8a5a12">Question</h2>
+    <p>_ask</p>
+    <p>audit_followup</p>
+    <div class="end">Status NEEDS_INPUT · no payment</div>
+  </div>
+</div>
+
+<div class="call2">
+  <h2>Call 2 · user approval, then pay</h2>
+  <p class="lead">Approval is its own request. The graph does not sit and wait.</p>
+  <ol class="rail">
+    <li class="ask">
+      <div class="dot"></div>
+      <div class="card">
+        <div class="who">Approval</div>
+        <div>
+          <div class="fn">decide_escalation → EscalationStore.decide</div>
+          <div class="meta">POST /escalations/{id}/decision · APPROVE or REFUSE</div>
+        </div>
+      </div>
+    </li>
+    <li class="agent">
+      <div class="dot"></div>
+      <div class="card">
+        <div class="who">Agent</div>
+        <div>
+          <div class="fn">agent_intent → _route_entry → get_escalation</div>
+          <div class="meta">Next POST /agent/intent carries escalation_id · GET /escalations/{id}</div>
+        </div>
+      </div>
+    </li>
+    <li class="agent">
+      <div class="dot"></div>
+      <div class="card">
+        <div class="who">Agent</div>
+        <div>
+          <div class="fn">_choose_entry</div>
+          <div class="chips">
+            <span class="chip">APPROVED → _pay</span>
+            <span class="chip">PENDING → _hold</span>
+            <span class="chip">REFUSED | EXPIRED | UNKNOWN → _abort</span>
+          </div>
+        </div>
+      </div>
+    </li>
+    <li class="pay">
+      <div class="dot"></div>
+      <div class="card">
+        <div class="who">Pay</div>
+        <div>
+          <div class="fn">_pay → pay → audit_payment</div>
+          <div class="meta">Only after APPROVED. FileMall.pay or POST /pay.</div>
+        </div>
+      </div>
+    </li>
+  </ol>
+</div>
+
+<div class="stops">
+  <b>_reason</b><span>question and no needs → audit_intent FOLLOW_UP → END. No search, cart, policy, or pay.</span>
+  <b>evaluate order</b><span>merchant_blacklisted → merchant_not_whitelisted → category_blacklisted → monthly_cap → over_bulk_ceiling → over_per_transaction_cap → pass</span>
+  <b>mall switch</b><span>FileMall unless MOCK_API_BASE_URL is set, then MallClient hits mockup-mall.</span>
+</div>
+</body>
+</html>

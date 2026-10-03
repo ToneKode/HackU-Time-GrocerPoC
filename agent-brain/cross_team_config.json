@@ -1,0 +1,453 @@
+{
+  "schema_version": 1,
+  "owner": "person_1",
+  "currency": "HKD",
+  "directories": {
+    "person_1": "agent-brain",
+    "person_2": "backend-policy",
+    "person_3": "frontend",
+    "person_4": "mockup-mall"
+  },
+  "services": {
+    "mock_api": {
+      "base_url": "http://localhost:8000",
+      "port": 8000,
+      "env_port": "MOCK_API_PORT"
+    },
+    "policy_api": {
+      "base_url": "http://localhost:8001",
+      "port": 8001,
+      "env_port": "POLICY_API_PORT"
+    },
+    "frontend_origin": "http://localhost:5173",
+    "env_frontend_origin": "FRONTEND_ORIGIN"
+  },
+  "limits": {
+    "per_transaction_cap": 500,
+    "bulk_ceiling": 800,
+    "monthly_cap": 2000,
+    "escalation_ttl_seconds": 600,
+    "free_shipping_threshold": 400,
+    "shipping_fee_below_threshold": 30,
+    "tax": 0,
+    "pay_delay_ms": 500,
+    "reward_points_divisor": 10,
+    "decline_cart_total": 666.0
+  },
+  "rules": {
+    "amount_field": "total_landed_cost",
+    "policy_amount_and_cart_total_use": "total_landed_cost",
+    "pass_when_amount_lte": 500,
+    "escalate_when_amount_gt": 500,
+    "escalate_when_amount_lte": 800,
+    "halt_when_amount_gt": 800,
+    "halt_when_monthly_spent_plus_amount_gt": 2000,
+    "product_name_is_untrusted": true,
+    "search_pick_rule": "first_product_in_response_order",
+    "cart_merchant_field": "ignored",
+    "merchant_comes_from": "product.merchant",
+    "agent_always_sends_idempotency_key": true,
+    "idempotency_key_template": "{sku}:{qty}:{policy_status}:{escalation_id}",
+    "idempotency_key_when_no_escalation": "none",
+    "pay_allowed_only_after": ["PASS", "APPROVED"],
+    "timestamp_timezone": "UTC",
+    "timestamp_format": "YYYY-MM-DDTHH:MM:SSZ",
+    "monthly_remaining_when_pass_or_escalate": "monthly_cap - monthly_spent - amount",
+    "monthly_remaining_when_halt": "monthly_cap - monthly_spent",
+    "money_round_decimals": 2,
+    "reward_points_formula": "floor(charged / 10)",
+    "agent_stdout": "one ActionPlan JSON object, no prose"
+  },
+  "policy_check_order": [
+    "merchant_blacklisted",
+    "merchant_not_whitelisted",
+    "category_blacklisted",
+    "monthly_cap",
+    "over_bulk_ceiling",
+    "over_per_transaction_cap",
+    "pass"
+  ],
+  "dictionaries": {
+    "policy_status": {
+      "PASS": "At or under 500 and inside the monthly cap",
+      "ESCALATE": "Over 500 and at or under 800",
+      "HALT": "Monthly cap, over 800, merchant, or category"
+    },
+    "plan_status": {
+      "READY": "Quote and policy are done, payment not sent",
+      "COMPLETED": "Payment success is true",
+      "HALTED": "Policy status is HALT",
+      "ESCALATED": "Escalation status is PENDING",
+      "ABORTED": "Escalation status is REFUSED or EXPIRED",
+      "FAILED": "Payment success is false"
+    },
+    "escalation_status": {
+      "PENDING": "Waiting for the mother",
+      "APPROVED": "Mother approved inside the TTL",
+      "REFUSED": "Mother refused",
+      "EXPIRED": "TTL reached 0"
+    },
+    "escalation_decision": {
+      "APPROVE": "Mother pressed Approve",
+      "REFUSE": "Mother pressed Refuse"
+    },
+    "reason": {
+      "PASS": "Under HK$500 cap",
+      "ESCALATE": "Over HK$500 per-transaction cap",
+      "HALT_MONTHLY": "Over HK$2000 monthly cap",
+      "HALT_BULK": "Over HK$800 bulk ceiling",
+      "HALT_MERCHANT": "Merchant not whitelisted",
+      "HALT_MERCHANT_BLACKLIST": "Merchant blacklisted",
+      "HALT_CATEGORY": "Category blacklisted"
+    },
+    "event": {
+      "INTENT_RECEIVED": "Agent accepted the intent",
+      "SEARCH": "search_hktv_sandbox returned",
+      "CART_PRICED": "price_cart returned",
+      "POLICY_CHECK": "check_budget returned",
+      "ESCALATION_CREATED": "create_escalation returned",
+      "ESCALATION_APPROVED": "Mother approved",
+      "ESCALATION_REFUSED": "Mother refused",
+      "ESCALATION_EXPIRED": "TTL expired",
+      "PAYMENT": "execute_payment returned",
+      "HALTED": "Plan stopped on HALT"
+    },
+    "tool": {
+      "search_hktv_sandbox": "GET /products",
+      "price_cart": "POST /cart",
+      "check_budget": "POST /check_policy",
+      "execute_payment": "POST /pay"
+    },
+    "payment_route": {
+      "mastercard": "Mastercard tokenized card",
+      "unionpay": "UnionPay tokenized card"
+    },
+    "default_payment_route": "mastercard",
+    "payment_error": {
+      "card_declined": "cart_total is 666.00"
+    },
+    "merchants": {
+      "whitelist": ["Watsons", "HKTVmall", "PARKnSHOP", "Japan Home Centre"],
+      "blacklist": ["DarkWebMart"]
+    },
+    "category_blacklist": ["Food", "Alcohol", "Electronics", "Health"],
+    "categories": ["Household", "Food", "Health", "Electronics"]
+  },
+  "audit": {
+    "algorithm": "sha256",
+    "encoding": "hex",
+    "genesis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "index_starts_at": 0,
+    "hash_fields_in_order": ["index", "ts", "event", "status", "reason", "prev_hash"],
+    "hash_join": "|"
+  },
+  "types": {
+    "Product": {
+      "id": "string",
+      "name": "string",
+      "price": "number",
+      "currency": "HKD",
+      "merchant": "string",
+      "category": "string",
+      "stock": "number",
+      "image_url": "string"
+    },
+    "CartLine": {
+      "sku": "string",
+      "name": "string",
+      "merchant": "string",
+      "category": "string",
+      "unit_price": "number",
+      "qty": "number",
+      "line_total": "number"
+    },
+    "CartQuote": {
+      "line_items": "CartLine[]",
+      "subtotal": "number",
+      "shipping_fee": "number",
+      "tax": "number",
+      "total_landed_cost": "number",
+      "currency": "HKD",
+      "free_shipping_threshold": "number"
+    },
+    "PolicyResult": {
+      "status": "PASS|ESCALATE|HALT",
+      "reason": "string",
+      "amount": "number",
+      "currency": "HKD",
+      "monthly_spent": "number",
+      "monthly_remaining": "number",
+      "per_transaction_cap": 500,
+      "monthly_cap": 2000,
+      "bulk_ceiling": 800
+    },
+    "PayResult": {
+      "success": "boolean",
+      "order_id": "string|null",
+      "charged": "number|null",
+      "currency": "HKD|null",
+      "payment_route": "mastercard|unionpay|null",
+      "reward_points_earned": "number|null",
+      "ts": "string|null",
+      "error": "string|null"
+    },
+    "LogEntry": {
+      "index": "number",
+      "ts": "string",
+      "event": "string",
+      "status": "string",
+      "reason": "string",
+      "prev_hash": "string",
+      "hash": "string"
+    },
+    "Escalation": {
+      "escalation_id": "string",
+      "status": "PENDING|APPROVED|REFUSED|EXPIRED",
+      "ttl_seconds": 600,
+      "expires_at": "string",
+      "remaining_seconds": "number",
+      "amount": "number",
+      "currency": "HKD",
+      "merchant": "string",
+      "sku": "string",
+      "reason": "string"
+    },
+    "ReactStep": {
+      "thought": "string",
+      "action": "search_hktv_sandbox|price_cart|check_budget|execute_payment",
+      "action_input": "object",
+      "output": "object"
+    },
+    "ActionPlan": {
+      "intent": "string",
+      "status": "READY|COMPLETED|HALTED|ESCALATED|ABORTED|FAILED",
+      "product": "Product|null",
+      "quote": "CartQuote|null",
+      "policy": "PolicyResult|null",
+      "escalation": "Escalation|null",
+      "payment": "PayResult|null",
+      "steps": "ReactStep[]"
+    }
+  },
+  "functions": {
+    "run_agent": {
+      "owner": "person_1",
+      "module": "agent-brain/agent.py",
+      "args": {
+        "intent": "string",
+        "monthly_spent": "number"
+      },
+      "returns": "ActionPlan"
+    },
+    "search_hktv_sandbox": {
+      "owner": "person_1",
+      "calls": "GET http://localhost:8000/products",
+      "args": {
+        "query": "string"
+      },
+      "query_param": {
+        "query": "q"
+      },
+      "returns": {
+        "products": "Product[]"
+      }
+    },
+    "get_product": {
+      "owner": "person_4",
+      "calls": "GET http://localhost:8000/products/{sku}",
+      "args": {
+        "sku": "string"
+      },
+      "returns": "Product",
+      "missing": {
+        "http_status": 404,
+        "detail": "Unknown SKU: {sku}"
+      }
+    },
+    "price_cart": {
+      "owner": "person_1",
+      "calls": "POST http://localhost:8000/cart",
+      "args": {
+        "items": [{"sku": "string", "qty": "number"}]
+      },
+      "returns": "CartQuote"
+    },
+    "check_budget": {
+      "owner": "person_1",
+      "calls": "POST http://localhost:8001/check_policy",
+      "args": {
+        "merchant": "string",
+        "category": "string",
+        "amount": "number",
+        "currency": "HKD",
+        "sku": "string",
+        "qty": "number",
+        "monthly_spent": "number"
+      },
+      "returns": "PolicyResult"
+    },
+    "log_event": {
+      "owner": "person_2",
+      "calls": "POST http://localhost:8001/log_event",
+      "args": {
+        "event": "string",
+        "status": "string",
+        "reason": "string"
+      },
+      "returns": "LogEntry"
+    },
+    "create_escalation": {
+      "owner": "person_2",
+      "calls": "POST http://localhost:8001/create_escalation",
+      "args": {
+        "amount": "number",
+        "currency": "HKD",
+        "merchant": "string",
+        "sku": "string",
+        "qty": "number",
+        "reason": "string"
+      },
+      "returns": "Escalation"
+    },
+    "get_escalation": {
+      "owner": "person_2",
+      "calls": "GET http://localhost:8001/escalations/{escalation_id}",
+      "args": {
+        "escalation_id": "string"
+      },
+      "returns": "Escalation"
+    },
+    "resolve_escalation": {
+      "owner": "person_3",
+      "calls": "POST http://localhost:8001/escalations/{escalation_id}/decision",
+      "args": {
+        "escalation_id": "string",
+        "decision": "APPROVE|REFUSE"
+      },
+      "returns": "Escalation"
+    },
+    "execute_payment": {
+      "owner": "person_1",
+      "calls": "POST http://localhost:8000/pay",
+      "args": {
+        "cart_total": "number",
+        "payment_route": "mastercard|unionpay",
+        "idempotency_key": "string"
+      },
+      "returns": "PayResult"
+    }
+  },
+  "examples": {
+    "product": {
+      "id": "SKU001",
+      "name": "Tempo Ultra Soft Toilet Paper 27 Rolls",
+      "price": 89.9,
+      "currency": "HKD",
+      "merchant": "Watsons",
+      "category": "Household",
+      "stock": 42,
+      "image_url": ""
+    },
+    "log_entry": {
+      "index": 0,
+      "ts": "2026-10-03T00:00:00Z",
+      "event": "POLICY_CHECK",
+      "status": "PASS",
+      "reason": "Under HK$500 cap",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "sha256 hex of index|ts|event|status|reason|prev_hash"
+    },
+    "pay_success": {
+      "success": true,
+      "order_id": "ORD-example1",
+      "charged": 119.9,
+      "currency": "HKD",
+      "payment_route": "mastercard",
+      "reward_points_earned": 11,
+      "ts": "2026-10-03T00:00:00Z",
+      "error": null
+    },
+    "pay_declined": {
+      "success": false,
+      "order_id": null,
+      "charged": null,
+      "currency": null,
+      "payment_route": null,
+      "reward_points_earned": null,
+      "ts": null,
+      "error": "card_declined"
+    },
+    "react_step": {
+      "thought": "I need to check the whitelist.",
+      "action": "check_budget",
+      "action_input": {
+        "merchant": "Watsons",
+        "category": "Household",
+        "amount": 119.9,
+        "currency": "HKD",
+        "sku": "SKU001",
+        "qty": 1,
+        "monthly_spent": 0
+      },
+      "output": {
+        "status": "PASS",
+        "reason": "Under HK$500 cap",
+        "amount": 119.9,
+        "currency": "HKD",
+        "monthly_spent": 0,
+        "monthly_remaining": 1880.1,
+        "per_transaction_cap": 500,
+        "monthly_cap": 2000,
+        "bulk_ceiling": 800
+      }
+    }
+  },
+  "scenarios": {
+    "happy_path": {
+      "intent": "Buy toilet paper",
+      "query": "toilet",
+      "sku": "SKU001",
+      "qty": 1,
+      "monthly_spent": 0,
+      "subtotal": 89.9,
+      "shipping_fee": 30,
+      "tax": 0,
+      "total_landed_cost": 119.9,
+      "policy_status": "PASS",
+      "reason": "Under HK$500 cap",
+      "plan_status": "COMPLETED",
+      "idempotency_key": "SKU001:1:PASS:none",
+      "reward_points_earned": 11
+    },
+    "halted_monthly": {
+      "intent": "Buy toilet paper",
+      "query": "toilet",
+      "sku": "SKU001",
+      "qty": 1,
+      "monthly_spent": 1900,
+      "total_landed_cost": 119.9,
+      "policy_status": "HALT",
+      "reason": "Over HK$2000 monthly cap",
+      "plan_status": "HALTED",
+      "payment": null
+    },
+    "escalation_bulk": {
+      "intent": "Buy bulk toilet paper",
+      "query": "bulk",
+      "sku": "SKU003",
+      "qty": 1,
+      "monthly_spent": 0,
+      "subtotal": 799.0,
+      "shipping_fee": 0,
+      "tax": 0,
+      "total_landed_cost": 799.0,
+      "policy_status": "ESCALATE",
+      "reason": "Over HK$500 per-transaction cap",
+      "ttl_seconds": 600,
+      "plan_status_while_pending": "ESCALATED",
+      "plan_status_if_approved": "COMPLETED",
+      "plan_status_if_refused_or_expired": "ABORTED",
+      "idempotency_key_after_approve": "SKU003:1:ESCALATE:{escalation_id}"
+    }
+  }
+}
