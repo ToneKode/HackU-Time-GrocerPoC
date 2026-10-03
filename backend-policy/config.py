@@ -48,12 +48,17 @@ def _ledger_path() -> str:
     return path if os.path.isabs(path) else str(BASE_DIR / path)    # same file whatever the cwd is
 
 
+def _redis_url() -> str:
+    # No Postgres and no Redis server. Anything else falls back to in-process fakeredis.
+    chosen = env("REDIS_URL", "fakeredis://")
+    return chosen if chosen.startswith("fakeredis") else "fakeredis://"
+
+
 def settings() -> dict:
     return {
         "port": int(env("POLICY_API_PORT", "8001")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
-        # fakeredis:// = in-process, no server needed. Real: redis://localhost:6379/0
-        "redis_url": env("REDIS_URL", "fakeredis://"),
+        "redis_url": _redis_url(),
         "ledger_path": _ledger_path(),
         "ttl": int(env("ESCALATION_TTL_SECONDS", "600")),
         "signing_secret": env("APPROVAL_SIGNING_SECRET", "dev-secret-change-me"),

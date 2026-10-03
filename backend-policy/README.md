@@ -6,21 +6,10 @@ Contract: `agent-brain/cross_team_config.json` and `frontend/contract.json`.
 ## Run
 ```bash
 cd backend-policy && pip install -r requirements.txt
-cp .env.example .env                         # loaded automatically; set REDIS_URL here
-uvicorn main:app --port 8001 --reload
+py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8001
 pytest -q
 ```
-Without `REDIS_URL` the service uses in-process fakeredis (no Redis needed, but escalations are lost on restart
-and a warning is logged). With real Redis:
-
-```bash
-docker run -d --name timegrocer-redis -p 6379:6379 redis:7 redis-server --appendonly yes
-redis-cli ping                               # PONG
-curl localhost:8001/health                   # {"ok":true,"audit_entries":N,"redis":true,"store":"redis"}
-```
-`store` must say `redis`, not `fakeredis`. The ledger (`data/ledger.jsonl`) is resolved relative to this folder,
-whatever directory you start uvicorn from. If Redis goes down, escalation endpoints answer `503` with a JSON body
-and the expiry sweeper keeps retrying; restart is not needed once Redis is back.
+This demo does not connect to Postgres or Redis. Escalations stay in in-process fakeredis, and the ledger is `data/ledger.jsonl`. A `REDIS_URL` that points at a real server is ignored.
 
 ## Endpoints
 | Method | Path | Who calls it | Notes |

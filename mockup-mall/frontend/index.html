@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Time-Grocer Mock Mall</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=PT+Sans:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="page-bg"></div>
+
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="brand-mark">HacKU</p>
+        <h1 class="brand">Time-Grocer Mock Mall</h1>
+        <p class="tagline">2010s demo storefront · wired to localhost:8000</p>
+      </div>
+      <div class="status-box" id="api-status" aria-live="polite">
+        Checking API…
+      </div>
+    </header>
+
+    <nav class="toolbar">
+      <form id="search-form" class="search-form">
+        <label for="q">Search</label>
+        <input id="q" name="q" type="text" placeholder="e.g. toilet" />
+        <label for="merchant">Merchant</label>
+        <select id="merchant" name="merchant">
+          <option value="">All merchants</option>
+        </select>
+        <label for="category">Category</label>
+        <select id="category" name="category">
+          <option value="">All categories</option>
+          <option>Household</option>
+          <option>Food</option>
+          <option>Health</option>
+          <option>Electronics</option>
+        </select>
+        <button type="submit" class="btn btn-blue">Find Items</button>
+        <button type="button" id="reset-filters" class="btn btn-gray">Reset</button>
+      </form>
+    </nav>
+
+    <main class="layout">
+      <section class="panel products-panel">
+        <div class="panel-head">
+          <h2>Product Catalog</h2>
+          <span id="product-count" class="badge">0 items</span>
+        </div>
+        <div id="product-error" class="flash error hidden"></div>
+        <div id="product-grid" class="product-grid"></div>
+      </section>
+
+      <aside class="panel cart-panel">
+        <div class="panel-head">
+          <h2>Your Cart</h2>
+          <span id="cart-count" class="badge">0</span>
+        </div>
+        <ul id="cart-lines" class="cart-lines"></ul>
+        <p id="cart-empty" class="muted">Cart is empty — add a product.</p>
+
+        <div class="totals boxed">
+          <div><span>Subtotal</span><strong id="subtotal">HK$0.00</strong></div>
+          <div><span>Shipping</span><strong id="shipping">HK$0.00</strong></div>
+          <div><span>Tax</span><strong id="tax">HK$0.00</strong></div>
+          <div class="grand">
+            <span>Total landed</span><strong id="tlc">HK$0.00</strong>
+          </div>
+          <p class="muted tiny" id="shipping-note">Free shipping at HK$400</p>
+        </div>
+
+        <button id="price-cart" class="btn btn-orange" type="button" disabled>
+          Price Cart via API
+        </button>
+
+        <fieldset class="pay-box">
+          <legend>Checkout / Pay</legend>
+          <label for="payment-route">Payment route</label>
+          <select id="payment-route">
+            <option value="mastercard">Mastercard</option>
+            <option value="visa">Visa</option>
+            <option value="octopus">Octopus</option>
+          </select>
+          <label for="idempotency-key">Idempotency key</label>
+          <input id="idempotency-key" type="text" placeholder="optional demo key" />
+          <button id="pay-now" class="btn btn-green" type="button" disabled>
+            Pay Now
+          </button>
+        </fieldset>
+
+        <div id="pay-result" class="flash hidden"></div>
+        <div id="merchant-box" class="merchant-box">
+          <h3>Merchant Rails</h3>
+          <p><strong>Whitelist:</strong> <span id="whitelist">…</span></p>
+          <p><strong>Blacklist:</strong> <span id="blacklist">…</span></p>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      Person 4 mock ecosystem · no live HKTV Mall scraping · mock-api only
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

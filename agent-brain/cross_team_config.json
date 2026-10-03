@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "owner": "person_1",
+  "source": "System Architecture chart plus the mock API already on dev",
+  "graph": "agent-brain/graph/shopping_graph.py",
   "currency": "HKD",
   "directories": {
     "person_1": "agent-brain",
@@ -12,12 +14,20 @@
     "mock_api": {
       "base_url": "http://localhost:8000",
       "port": 8000,
-      "env_port": "MOCK_API_PORT"
+      "env_port": "MOCK_API_PORT",
+      "owns": ["GET /products", "GET /products/{sku}", "POST /cart", "POST /pay"]
     },
     "policy_api": {
       "base_url": "http://localhost:8001",
       "port": 8001,
-      "env_port": "POLICY_API_PORT"
+      "env_port": "POLICY_API_PORT",
+      "owns": ["POST /check_policy", "POST /log_event", "POST /create_escalation", "GET /escalations/{escalation_id}", "POST /escalations/{escalation_id}/decision"]
+    },
+    "agent": {
+      "base_url": "http://localhost:8002",
+      "port": 8002,
+      "env_port": "AGENT_PORT",
+      "owns": ["POST /agent/intent"]
     },
     "frontend_origin": "http://localhost:5173",
     "env_frontend_origin": "FRONTEND_ORIGIN"
@@ -31,7 +41,6 @@
     "shipping_fee_below_threshold": 30,
     "tax": 0,
     "pay_delay_ms": 500,
-    "reward_points_divisor": 10,
     "decline_cart_total": 666.0
   },
   "rules": {
@@ -55,8 +64,10 @@
     "monthly_remaining_when_pass_or_escalate": "monthly_cap - monthly_spent - amount",
     "monthly_remaining_when_halt": "monthly_cap - monthly_spent",
     "money_round_decimals": 2,
-    "reward_points_formula": "floor(charged / 10)",
-    "agent_stdout": "one ActionPlan JSON object, no prose"
+    "agent_response": "one ActionPlan JSON object",
+    "llm_may_decide": ["query", "qty"],
+    "llm_must_not_decide": ["policy_status", "payment_success", "merchant_whitelist", "caps", "hash"],
+    "ignored_by_person_1": []
   },
   "policy_check_order": [
     "merchant_blacklisted",
@@ -102,21 +113,25 @@
     },
     "event": {
       "INTENT_RECEIVED": "Agent accepted the intent",
-      "SEARCH": "search_hktv_sandbox returned",
+      "SEARCH": "search_products returned",
       "CART_PRICED": "price_cart returned",
       "POLICY_CHECK": "check_budget returned",
       "ESCALATION_CREATED": "create_escalation returned",
       "ESCALATION_APPROVED": "Mother approved",
       "ESCALATION_REFUSED": "Mother refused",
       "ESCALATION_EXPIRED": "TTL expired",
+      "PLAN": "Fixed tool order recorded",
       "PAYMENT": "execute_payment returned",
       "HALTED": "Plan stopped on HALT"
     },
     "tool": {
-      "search_hktv_sandbox": "GET /products",
+      "search_products": "GET /products",
       "price_cart": "POST /cart",
       "check_budget": "POST /check_policy",
       "execute_payment": "POST /pay"
+    },
+    "tool_alias_from_task_doc": {
+      "search_hktv_sandbox": "search_products"
     },
     "payment_route": {
       "mastercard": "Mastercard tokenized card",
@@ -130,8 +145,13 @@
       "whitelist": ["Watsons", "HKTVmall", "PARKnSHOP", "Japan Home Centre"],
       "blacklist": ["DarkWebMart"]
     },
-    "category_blacklist": ["Food", "Alcohol", "Electronics", "Health"],
-    "categories": ["Household", "Food", "Health", "Electronics"]
+    "category_blacklist": [],
+    "categories": ["Household", "Food", "Health", "Electronics"],
+    "react_stage": {
+      "reason": "Turn the sentence into a goal. This is the only model step.",
+      "plan": "Choose the tool order. Fixed by this file, not by the model.",
+      "action": "Call the next tool and store its return value."
+    }
   },
   "audit": {
     "algorithm": "sha256",
@@ -142,6 +162,11 @@
     "hash_join": "|"
   },
   "types": {
+    "Goal": {
+      "intent": "string",
+      "query": "string",
+      "qty": "number"
+    },
     "Product": {
       "id": "string",
       "name": "string",
@@ -187,7 +212,6 @@
       "charged": "number|null",
       "currency": "HKD|null",
       "payment_route": "mastercard|unionpay|null",
-      "reward_points_earned": "number|null",
       "ts": "string|null",
       "error": "string|null"
     },
@@ -213,14 +237,16 @@
       "reason": "string"
     },
     "ReactStep": {
+      "stage": "reason|plan|action",
       "thought": "string",
-      "action": "search_hktv_sandbox|price_cart|check_budget|execute_payment",
+      "action": "search_products|price_cart|check_budget|execute_payment|create_escalation|log_event",
       "action_input": "object",
       "output": "object"
     },
     "ActionPlan": {
       "intent": "string",
       "status": "READY|COMPLETED|HALTED|ESCALATED|ABORTED|FAILED",
+      "goal": "Goal",
       "product": "Product|null",
       "quote": "CartQuote|null",
       "policy": "PolicyResult|null",
@@ -232,15 +258,18 @@
   "functions": {
     "run_agent": {
       "owner": "person_1",
+      "route": "POST /agent/intent",
       "module": "agent-brain/agent.py",
       "args": {
         "intent": "string",
         "monthly_spent": "number"
       },
-      "returns": "ActionPlan"
+      "returns": "ActionPlan",
+      "holds_open_for_ttl": false
     },
-    "search_hktv_sandbox": {
+    "search_products": {
       "owner": "person_1",
+      "chart_name": "search_products()",
       "calls": "GET http://localhost:8000/products",
       "args": {
         "query": "string"
@@ -270,10 +299,12 @@
       "args": {
         "items": [{"sku": "string", "qty": "number"}]
       },
-      "returns": "CartQuote"
+      "returns": "CartQuote",
+      "why_it_exists": "The chart draws /cart on the gateway. Shipping changes the amount that check_budget and execute_payment must use."
     },
     "check_budget": {
       "owner": "person_1",
+      "chart_name": "check_budget()",
       "calls": "POST http://localhost:8001/check_policy",
       "args": {
         "merchant": "string",
@@ -288,6 +319,7 @@
     },
     "log_event": {
       "owner": "person_2",
+      "called_by": "person_1",
       "calls": "POST http://localhost:8001/log_event",
       "args": {
         "event": "string",
@@ -298,6 +330,7 @@
     },
     "create_escalation": {
       "owner": "person_2",
+      "called_by": "person_1",
       "calls": "POST http://localhost:8001/create_escalation",
       "args": {
         "amount": "number",
@@ -328,13 +361,15 @@
     },
     "execute_payment": {
       "owner": "person_1",
+      "chart_name": "execute_payment()",
       "calls": "POST http://localhost:8000/pay",
       "args": {
         "cart_total": "number",
         "payment_route": "mastercard|unionpay",
         "idempotency_key": "string"
       },
-      "returns": "PayResult"
+      "returns": "PayResult",
+      "guard": "pay_allowed_only_after PASS or APPROVED"
     }
   },
   "examples": {
@@ -347,6 +382,11 @@
       "category": "Household",
       "stock": 42,
       "image_url": ""
+    },
+    "goal_buy": {
+      "intent": "Buy toilet paper",
+      "query": "toilet",
+      "qty": 1
     },
     "log_entry": {
       "index": 0,
@@ -363,7 +403,6 @@
       "charged": 119.9,
       "currency": "HKD",
       "payment_route": "mastercard",
-      "reward_points_earned": 11,
       "ts": "2026-10-03T00:00:00Z",
       "error": null
     },
@@ -373,33 +412,8 @@
       "charged": null,
       "currency": null,
       "payment_route": null,
-      "reward_points_earned": null,
       "ts": null,
       "error": "card_declined"
-    },
-    "react_step": {
-      "thought": "I need to check the whitelist.",
-      "action": "check_budget",
-      "action_input": {
-        "merchant": "Watsons",
-        "category": "Household",
-        "amount": 119.9,
-        "currency": "HKD",
-        "sku": "SKU001",
-        "qty": 1,
-        "monthly_spent": 0
-      },
-      "output": {
-        "status": "PASS",
-        "reason": "Under HK$500 cap",
-        "amount": 119.9,
-        "currency": "HKD",
-        "monthly_spent": 0,
-        "monthly_remaining": 1880.1,
-        "per_transaction_cap": 500,
-        "monthly_cap": 2000,
-        "bulk_ceiling": 800
-      }
     }
   },
   "scenarios": {
@@ -417,7 +431,7 @@
       "reason": "Under HK$500 cap",
       "plan_status": "COMPLETED",
       "idempotency_key": "SKU001:1:PASS:none",
-      "reward_points_earned": 11
+      "monthly_remaining": 1880.1
     },
     "halted_monthly": {
       "intent": "Buy toilet paper",
@@ -429,6 +443,7 @@
       "policy_status": "HALT",
       "reason": "Over HK$2000 monthly cap",
       "plan_status": "HALTED",
+      "monthly_remaining": 100,
       "payment": null
     },
     "escalation_bulk": {

@@ -694,16 +694,15 @@ def test_team_contract_covers_both_readers() -> None:
     }
 
 
-def test_home_page_has_chat_and_ticket() -> None:
+def test_home_page_does_not_dump_the_plan() -> None:
     api, _policy = client()
     page = api.get("/")
     assert page.status_code == 200
     text = page.text
-    assert 'id="intent"' in text
-    assert 'id="ticket"' in text
+    assert "localhost:5173/agent" in text
     assert "/agent/intent" in text
-    assert "one cheap item from every category" in text
-    assert 'id="react"' in text
+    assert 'id="ticket"' not in text
+    assert "<pre" not in text
 
 
 if __name__ == "__main__":
@@ -731,5 +730,5 @@ if __name__ == "__main__":
     test_vague_request_asks_a_follow_up()
     test_llm_react_is_shown_before_the_tool_steps()
     test_team_contract_covers_both_readers()
-    test_home_page_has_chat_and_ticket()
+    test_home_page_does_not_dump_the_plan()
     print("ok")

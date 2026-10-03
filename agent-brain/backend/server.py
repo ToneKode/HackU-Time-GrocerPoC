@@ -1,6 +1,6 @@
 """Person 1 HTTP server.
 
-GET / is the chat page. POST /agent/intent runs the LangGraph.
+GET / points at the shop. POST /agent/intent runs the LangGraph.
 The reason node calls OpenRouter. The mall is fake_mall/*.json until
 MOCK_API_BASE_URL is set. Policy calls go to port 8001 and fall back to the same caps.
 
@@ -22,7 +22,15 @@ from fake_mall import FileMall
 from models import ActionPlan, IntentIn
 
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
-PAGE = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
+HOME = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Time Grocer agent</title></head>
+<body>
+  <p>The shop is at <a href="http://localhost:5173/agent">http://localhost:5173/agent</a>.</p>
+  <p>This port accepts POST /agent/intent. The shop draws the reply. The plan is not printed here.</p>
+</body>
+</html>
+"""
 
 
 def load_env(path: Path) -> None:
@@ -58,7 +66,7 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def home() -> str:
-        return PAGE.read_text(encoding="utf-8")
+        return HOME
 
     @app.post("/agent/intent", response_model=ActionPlan)
     def agent_intent(body: IntentIn) -> ActionPlan:

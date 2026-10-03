@@ -1,7 +1,8 @@
 <script setup>
 // Chat with the shopping agent. Each request is a user message; the agent replies with a
 // message that carries the ActionPlan (order, approval card, steps). Settings live in a sidebar.
-import { ref, reactive, computed, nextTick, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import contract from '../../contract.json'
 import * as api from '../lib/api.js'
@@ -20,6 +21,8 @@ import {
 } from '@hugeicons/core-free-icons'
 
 const { t, tm, rt } = useI18n()
+const route = useRoute()
+const router = useRouter()
 
 // ---- Messages ----
 // { id, role: 'user' | 'agent', kind: 'text' | 'thinking' | 'plan' | 'error', text?, plan?, request? }
@@ -66,6 +69,13 @@ function onKeydown(event) {
     send()
   }
 }
+
+onMounted(() => {
+  const intent = String(route.query.intent || '').trim()
+  if (!intent) return
+  router.replace({ name: 'agent' })
+  send(intent)
+})
 
 function send(text = draft.value) {
   const intent = text.trim()
@@ -153,6 +163,8 @@ async function onDecide(message, decision) {
 
 // The sentence the agent says for a plan.
 function summary(plan) {
+  if (plan.reply) return plan.reply
+  if (plan.question) return plan.question
   const product = plan.product ? productName(plan.product) : ''
   const store = plan.product ? storeName(plan.product.merchant) : ''
   const amount = money(plan.payment?.charged ?? plan.policy?.amount ?? plan.quote?.total_landed_cost)
@@ -167,9 +179,15 @@ function summary(plan) {
       return t('agentChat.failed', { error: plan.payment?.error ?? '' })
     case 'ABORTED':
       return t('agentChat.refused')
+    case 'NEEDS_INPUT':
+      return t('agentChat.needsInput')
     default:
       return t('agentChat.ready', { product, store, amount })
   }
+}
+
+function llmSteps(plan) {
+  return (plan.react || []).filter((step) => step.source === 'llm' && step.thought)
 }
 
 function clearChat() {
@@ -239,8 +257,10 @@ const userInitial = computed(() => (session.user?.name?.charAt(0) || t('agentCha
 
             <!-- agent result -->
             <template v-else-if="m.kind === 'plan'">
+              <p v-for="(step, i) in llmSteps(m.plan)" :key="`${m.id}-thought-${i}`" class="bubble">{{ step.thought }}</p>
               <p class="bubble">{{ summary(m.plan) }}</p>
-              <OrderCard v-if="m.plan.status === 'COMPLETED' && m.plan.payment" :plan="m.plan" class="msg-card" />
+              <p v-if="m.plan.question && m.plan.reply" class="bubble">{{ m.plan.question }}</p>
+              <OrderCard v-if="m.plan.payment || m.plan.lines?.length" :plan="m.plan" class="msg-card" />
               <ApprovalCard
                 v-if="m.plan.status === 'ESCALATED' && escalations[m.plan.escalation.escalation_id]"
                 :escalation="escalations[m.plan.escalation.escalation_id]"

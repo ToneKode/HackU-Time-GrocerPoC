@@ -166,3 +166,5 @@ h2 { font-size: 1rem; margin-bottom: 12px; }
 .thought { font-size: 0.9rem; }
 .trace .muted { font-size: 0.85rem; }
 .hashes { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
+.basket-lines { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.basket-lines li { font-weight: 600; }

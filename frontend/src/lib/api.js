@@ -2,7 +2,8 @@
 import * as mock from './mock.js'
 
 const env = import.meta.env
-export const useMock = env.VITE_USE_MOCK !== 'false'
+// Live agent and policy unless a local env file sets VITE_USE_MOCK=true.
+export const useMock = env.VITE_USE_MOCK === 'true'
 const AGENT_URL = env.VITE_AGENT_URL || 'http://localhost:8002'
 const POLICY_URL = env.VITE_POLICY_URL || 'http://localhost:8001'
 

@@ -1,0 +1,161 @@
+{
+  "for": ["person_3", "person_4"],
+  "from": "person_1",
+  "currency": "HKD",
+  "replaces_for_baskets": "frontend/contract.json stays the single-item screen guide. This file is the basket contract.",
+  "person_2_does_not_call_person_4": true,
+  "person_4": {
+    "base_url": "http://127.0.0.1:8000",
+    "receives_from_person_2": null,
+    "mixed_merchants_in_one_cart": true,
+    "one_pay_call_is_one_charge": true,
+    "shipping": "HK$30 when the combined subtotal is under HK$400, free at HK$400. One fee for the whole cart.",
+    "cart": {
+      "method": "POST",
+      "url": "http://127.0.0.1:8000/cart",
+      "body": {"items": [{"sku": "SKU001", "qty": 1}, {"sku": "SKU028", "qty": 1}]},
+      "ignored": "A top-level merchant field. Each line keeps the merchant stored on the product.",
+      "returns": ["line_items", "subtotal", "shipping_fee", "tax", "total_landed_cost", "currency"]
+    },
+    "pay": {
+      "method": "POST",
+      "url": "http://127.0.0.1:8000/pay",
+      "body": {"cart_total": 79.8, "payment_route": "mastercard", "idempotency_key": "string"},
+      "does_not_choose_payment_route": true,
+      "does_not_apply_promos": true,
+      "declines_when_cart_total_is": 666.0,
+      "decline_error": "card_declined",
+      "caller": "person 1, only after policy PASS or an approved escalation"
+    },
+    "still_needed": [
+      "Add sell_point to the product model and return it from GET /products and GET /products/{sku}.",
+      "Accept payment_route on POST /cart and return discount plus the reduced total_landed_cost. Until then person 1 does not subtract a promo from the amount it sends to POST /pay."
+    ]
+  },
+  "person_3": {
+    "call": {
+      "method": "POST",
+      "url": "http://127.0.0.1:8002/agent/intent",
+      "body": {"intent": "string", "monthly_spent": 0, "escalation_id": "omit on a new purchase"}
+    },
+    "do_not_call": ["GET /products", "POST /cart", "POST /pay", "POST /check_policy", "POST /log_event", "POST /create_escalation"],
+    "render_lines_when": "lines is non-empty. One row per line, with product_reason and merchant_reason.",
+    "render_question_when": "status == NEEDS_INPUT. Do not show a paid order and do not start the approval timer.",
+    "reply": "Send the shopper's answer as a new intent. The agent does not yet apply 'make the swap' or 'send for approval'.",
+    "audit": "Show every BASKET_PICKED, POLICY_CHECK, and BASKET_REVISED, in index order. POLICY_CHECK.result and HALTED.result are the policy engine snapshot. They are not part of the hash.",
+    "labels": {
+      "plan_status": {
+        "COMPLETED": "Order placed",
+        "HALTED": "Halted",
+        "ESCALATED": "Needs your approval",
+        "NEEDS_INPUT": "Need a choice",
+        "FAILED": "Could not finish",
+        "ABORTED": "Purchase cancelled"
+      }
+    }
+  },
+  "action_plan_fields": {
+    "lines": "Chosen products. Empty on a one-product run.",
+    "repairs": "Swaps already made so the basket could fit.",
+    "payment_route": "The route person 1 chose. Person 4 echoes it on POST /pay.",
+    "payment_reason": "Why that route. Estimated promo savings are not subtracted from quote.total_landed_cost.",
+    "question": "Empty unless status is NEEDS_INPUT.",
+    "reply": "What the shopper should read. When some categories are blacklisted, this says so. lines, quote, and payment are only the items that can still be paid.",
+    "react": "ReAct trace in order. Each step has thought, action, observation, and source. source llm is the model. source agent is a tool step. source catalog means code built the needs without the model.",
+    "policy": "The last policy result. Earlier results are in audit_log.",
+    "audit_log.result": "On POLICY_CHECK and HALTED, the engine snapshot: status, rule, reason, amount, currency, monthly_spent, monthly_remaining, per_transaction_cap, monthly_cap, bulk_ceiling. Omitted from the hash.",
+    "quote.total_landed_cost": "The number person 2 judged and the number person 4 is asked to charge."
+  },
+  "cases": [
+    {
+      "id": "mixed_merchants_pass",
+      "intent": "cheap toilet paper and a cheap food container",
+      "expect": {
+        "status": "COMPLETED",
+        "skus": ["SKU001", "SKU028"],
+        "merchants": ["Watsons", "Japan Home Centre"],
+        "total_landed_cost": 79.8,
+        "policy": "PASS",
+        "payment": 79.8
+      }
+    },
+    {
+      "id": "repick_same_sell_point",
+      "note": "The live shelf has one product per sell point per category, so this case uses a stand-in catalog. Person 4 can make it real by stocking two merchants for one sell point.",
+      "first_basket": 520.0,
+      "after_swap": 494.0,
+      "saved": 26.0,
+      "policy_rounds": ["ESCALATE at 520.00", "PASS at 494.00"],
+      "audit_includes": "BASKET_REVISED"
+    },
+    {
+      "id": "ask_before_sell_point_change",
+      "intent": "cheap toilet paper and 2 best rated shampoo",
+      "expect": {
+        "status": "NEEDS_INPUT",
+        "total_landed_cost": 589.9,
+        "policy_rule": "over_per_transaction_cap",
+        "payment": null,
+        "escalation": null
+      }
+    },
+    {
+      "id": "category_halt",
+      "intent": "cheap toilet paper and everyday rice",
+      "expect": {
+        "status": "COMPLETED",
+        "paid_skus": ["SKU001", "SKU005"],
+        "total_landed_cost": 127.9,
+        "payment": 127.9,
+        "logged_lines": ["SKU001", "SKU005"]
+      }
+    },
+    {
+      "id": "one_item_every_category",
+      "intent": "one cheap item from every category",
+      "expect": {
+        "status": "COMPLETED",
+        "skus": ["SKU001", "SKU004", "SKU007", "SKU010", "SKU013", "SKU016", "SKU019", "SKU022", "SKU025", "SKU028"],
+        "total_landed_cost": 326.6,
+        "policy": "PASS",
+        "payment": 326.6,
+        "audit": "One policy check per line, then one check of the landed total. Every category is allowed."
+      }
+    },
+    {
+      "id": "same_merchant",
+      "intent": "one cheap item from every category, same merchant",
+      "expect": {
+        "status": "NEEDS_INPUT",
+        "merchant": "HKTVmall",
+        "skus": ["SKU002", "SKU005", "SKU008", "SKU010", "SKU014", "SKU017", "SKU020", "SKU023", "SKU025", "SKU029"],
+        "total_landed_cost": 568.7,
+        "payment": null,
+        "reply": "Code compared the shops and locked the basket to HKTVmall. The landed total is over HK$500, so the agent asks before paying."
+      }
+    }
+  ],
+  "follow_up": {
+    "person_2": [
+      "Accept lines on POST /check_policy: merchant, category, sku, qty, and line_total on each line, plus amount as the landed total. Judge merchant and category per line, and the HK$500 / HK$800 / HK$2000 caps on amount.",
+      "Until that body exists, person 1 sends one check per line and one check for the total. The total call uses the only merchant when every line shares one, otherwise the first line's merchant, and a blank category when the lines differ. Your category list still runs on the line calls.",
+      "Do not choose a SKU or a payment route.",
+      "Keep logging approval, refusal, and expiry. Person 1 logs every POLICY_CHECK it tried, including the baskets that lose, plus BASKET_REVISED when a line moves."
+    ],
+    "person_3": [
+      "Read this file. Render lines, both reasons, payment_route, and payment_reason.",
+      "On NEEDS_INPUT, show question and wait. Do not open the 10-minute approval from that status.",
+      "Show reply when it is set. A blacklist reply means those categories were left out. A same-merchant reply names the shop the agent picked and the coverage of the other shops. lines, quote, and payment are the items that are ready to pay.",
+      "Render react in order as Thought, Action, Observation. Keep the source label. llm is the model trace. agent is the tool that actually ran.",
+      "Show the whole audit, not only the last POLICY_CHECK. Render audit_log.result on each POLICY_CHECK and on HALTED. Render BASKET_PICKED.thought so the shopper can see why each line was chosen.",
+      "A later intent can carry the shopper's choice. Person 1 does not yet turn 'make the swap' or 'send for approval' into a new basket."
+    ],
+    "person_4": [
+      "Keep several merchants in one POST /cart. Shipping stays one fee on the combined subtotal unless you change it; if you do, total_landed_cost is still the only number person 1 will check and pay.",
+      "POST /pay charges cart_total on the payment_route person 1 sends. You do not pick the card. You receive nothing from person 2.",
+      "Add sell_point to Product and return it.",
+      "Next step, not required for the current agent: POST /cart takes payment_route and returns the discount and the reduced total. Person 1 will keep charging the unreduced total until that exists.",
+      "One request, one charge. Split tender is outside this contract."
+    ]
+  }
+}

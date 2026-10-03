@@ -22,18 +22,11 @@ npm run dev
 
 Open http://localhost:5173.
 
-## Mock vs live
+## Live agent
 
-By default the app uses a **fake backend in the browser** (`src/lib/mock.js`), built from the
-contract's examples, so every screen works before the agent and policy services exist.
+The shop calls the agent on port 8002 and the policy engine on port 8001. It does not open a database. Login and the cart stay in the browser. Replies are cards, not a JSON dump.
 
-To call the real services, create `frontend/.env.local`:
-
-```
-VITE_USE_MOCK=false
-VITE_AGENT_URL=http://localhost:8002
-VITE_POLICY_URL=http://localhost:8001
-```
+Start the policy engine, then the agent, then this app. Set `VITE_USE_MOCK=true` in `frontend/.env.local` only if you want the in-browser fake.
 
 ## Where things are
 

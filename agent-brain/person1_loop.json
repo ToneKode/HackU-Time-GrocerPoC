@@ -1,0 +1,37 @@
+{
+  "owner": "person_1",
+  "stack": "langgraph",
+  "tools_implemented": false,
+  "ignored": ["reward_points", "use_reward_points", "cashback"],
+  "files": {
+    "graph": "graph/shopping_graph.py",
+    "rules": "graph/rules.json",
+    "picture": "graph/preview.html",
+    "traces": "graph/traces"
+  },
+  "what_person_1_owns": [
+    "POST /agent/intent",
+    "Reason, then Plan, then Action",
+    "The tool-call order",
+    "A hash-chained log entry after every step"
+  ],
+  "logging": {
+    "pattern": "Each step node is followed by its own audit node. The audit node writes the log, then the edge fires.",
+    "hash_fields_in_order": ["index", "ts", "event", "status", "reason", "prev_hash"],
+    "hash_join": "|",
+    "algorithm": "sha256",
+    "encoding": "hex",
+    "genesis_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "stored_beside_the_hash": ["node", "stage", "thought", "call", "action_input", "rule", "tool_called", "checks"]
+  },
+  "entry_edges": {
+    "new_intent": "reason",
+    "escalation_status_APPROVED": "execute_payment"
+  },
+  "policy_edges": {
+    "PASS": "execute_payment",
+    "ESCALATE": "create_escalation",
+    "HALT": "halt"
+  },
+  "holds_open_for_ttl": false
+}

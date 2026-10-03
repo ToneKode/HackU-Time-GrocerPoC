@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { merchants } from '../data/catalog.js'
 import { optimalMix, singleStoreTotals, mixSavings, sortedOffers } from '../lib/pricing.js'
 import { money } from '../lib/format.js'
@@ -14,6 +15,7 @@ import {
   ArrowDown01Icon, ArrowUp01Icon, AiMagicIcon,
 } from '@hugeicons/core-free-icons'
 
+const router = useRouter()
 const allowed = ref(merchants.map((m) => m.name))
 const mode = ref('mix') // 'mix' | 'single'
 const openStore = ref(null)
@@ -21,6 +23,14 @@ const openStore = ref(null)
 const mix = computed(() => optimalMix(cartLines.value, allowed.value))
 const stores = computed(() => singleStoreTotals(cartLines.value, allowed.value))
 const savings = computed(() => mixSavings(mix.value, stores.value))
+
+function checkoutWithAgent() {
+  const parts = cartLines.value.map((line) => `${line.qty} ${line.product.name}`)
+  if (!parts.length) return
+  let intent = `buy ${parts.join(' and ')}`
+  if (mode.value === 'single' && openStore.value) intent += ` from ${openStore.value}`
+  router.push({ name: 'agent', query: { intent } })
+}
 </script>
 
 <template>
@@ -152,8 +162,8 @@ const savings = computed(() => mixSavings(mix.value, stores.value))
           <span class="muted small">{{ $t('cart.total', cartCount) }}</span>
           <strong class="checkout-total">{{ money(mix.total) }}</strong>
         </div>
-        <button type="button" class="btn-primary" disabled :title="$t('cart.comingSoon')">
-          <Icon :icon="AiMagicIcon" :size="18" /> {{ $t('cart.checkoutAgent') }} <span class="soon">{{ $t('cart.soon') }}</span>
+        <button type="button" class="btn-primary" @click="checkoutWithAgent">
+          <Icon :icon="AiMagicIcon" :size="18" /> {{ $t('cart.checkoutAgent') }}
         </button>
       </section>
     </template>
