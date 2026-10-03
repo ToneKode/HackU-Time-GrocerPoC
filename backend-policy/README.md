@@ -9,7 +9,16 @@ cd backend-policy && pip install -r requirements.txt
 py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8001
 pytest -q
 ```
-This demo does not connect to Postgres or Redis. Escalations stay in in-process fakeredis, and the ledger is `data/ledger.jsonl`. A `REDIS_URL` that points at a real server is ignored.
+
+By default escalations use in-process fakeredis and the ledger is `data/ledger.jsonl`.
+For durable stores, start `persistance/` (Postgres + Redis) and export:
+
+```bash
+export DATABASE_URL=postgresql://tg:tg@127.0.0.1:5432/time_grocer
+export REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+See `persistance/README.md`. Tests still force fakeredis + a temp JSONL file via `conftest.py`.
 
 ## Endpoints
 | Method | Path | Who calls it | Notes |

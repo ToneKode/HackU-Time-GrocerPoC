@@ -4,6 +4,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 os.environ["REDIS_URL"] = "fakeredis://"
+os.environ.pop("DATABASE_URL", None)  # unit tests stay on the JSONL ledger
 os.environ["LEDGER_PATH"] = os.path.join(tempfile.mkdtemp(), "ledger.jsonl")
 os.environ["ESCALATION_TTL_SECONDS"] = "2"
 os.environ["DEMO_MODE"] = "true"

@@ -49,9 +49,16 @@ def _ledger_path() -> str:
 
 
 def _redis_url() -> str:
-    # No Postgres and no Redis server. Anything else falls back to in-process fakeredis.
-    chosen = env("REDIS_URL", "fakeredis://")
-    return chosen if chosen.startswith("fakeredis") else "fakeredis://"
+    # Default stays in-process fakeredis for a zero-dep demo.
+    # Point REDIS_URL at the persistance Redis (see persistance/compose.yaml) for real TTLs.
+    return env("REDIS_URL", "fakeredis://")
+
+
+def _database_url() -> str | None:
+    # When set, the hash-chained ledger lives in Postgres (persistance subtree).
+    # Empty / unset keeps the JSONL file at LEDGER_PATH.
+    url = env("DATABASE_URL", "").strip()
+    return url or None
 
 
 def settings() -> dict:
@@ -59,6 +66,7 @@ def settings() -> dict:
         "port": int(env("POLICY_API_PORT", "8001")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
         "redis_url": _redis_url(),
+        "database_url": _database_url(),
         "ledger_path": _ledger_path(),
         "ttl": int(env("ESCALATION_TTL_SECONDS", "600")),
         "signing_secret": env("APPROVAL_SIGNING_SECRET", "dev-secret-change-me"),

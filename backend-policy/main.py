@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 import policy_engine
-from audit_log import AuditLog
+from audit_log import make_audit_log
 from config import (BULK_CEILING, CATEGORY_BLACKLIST, CURRENCY, MERCHANT_BLACKLIST, MERCHANT_WHITELIST,
                     MONTHLY_CAP, PER_TRANSACTION_CAP, settings)
 from escalations import BadSignature, Escalations, NotFound, make_redis
@@ -26,7 +26,8 @@ log = logging.getLogger("policy")
 
 S = settings()
 USING_FAKEREDIS = S["redis_url"].startswith("fakeredis")
-audit = AuditLog(S["ledger_path"])
+USING_POSTGRES = bool(S["database_url"])
+audit = make_audit_log(S["database_url"], S["ledger_path"])
 escalations = Escalations(make_redis(S["redis_url"]), audit, S["ttl"], S["signing_secret"])
 
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -34,6 +35,10 @@ NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if USING_POSTGRES:
+        log.info("Audit ledger: Postgres (%s)", S["database_url"].split("@")[-1])
+    else:
+        log.info("Audit ledger: JSONL file at %s", S["ledger_path"])
     if USING_FAKEREDIS:
         log.warning("REDIS_URL not set: using in-process fakeredis. Escalations are lost on restart.")
     else:
@@ -116,8 +121,15 @@ def health() -> dict:
         redis_ok = bool(escalations.r.ping())
     except redis.RedisError:
         redis_ok = False
-    return {"ok": redis_ok, "audit_entries": len(audit.entries()), "redis": redis_ok,
-            "store": "fakeredis" if USING_FAKEREDIS else "redis"}
+    return {
+        "ok": redis_ok,
+        "audit_entries": len(audit.entries()),
+        "redis": redis_ok,
+        "store": {
+            "audit": "postgres" if USING_POSTGRES else "jsonl",
+            "escalations": "fakeredis" if USING_FAKEREDIS else "redis",
+        },
+    }
 
 
 @app.post("/check_policy")
