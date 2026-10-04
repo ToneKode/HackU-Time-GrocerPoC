@@ -1,0 +1,186 @@
+{
+  "scenario": "escalation_bulk",
+  "intent": "Buy bulk toilet paper",
+  "tools_implemented": false,
+  "expected_plan_status": "ESCALATED",
+  "path": [
+    "route_entry",
+    "reason",
+    "audit_intent",
+    "plan",
+    "audit_plan",
+    "search_products",
+    "audit_search",
+    "price_cart",
+    "audit_cart",
+    "check_budget",
+    "audit_policy",
+    "create_escalation",
+    "audit_escalation"
+  ],
+  "audit_log": [
+    {
+      "index": 0,
+      "ts": "2026-10-03T12:00:00Z",
+      "event": "INTENT_RECEIVED",
+      "status": "PARSED",
+      "reason": "Model may decide query and qty only",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+      "node": "reason",
+      "stage": "reason",
+      "thought": "Read the sentence. Set query and qty. Leave allow, halt, and pay to the later nodes.",
+      "call": null,
+      "action_input": {
+        "intent": "Buy bulk toilet paper"
+      },
+      "rule": "llm_may_decide = query, qty",
+      "tool_called": false,
+      "goal": {
+        "intent": "Buy bulk toilet paper",
+        "query": "bulk",
+        "qty": 1
+      }
+    },
+    {
+      "index": 1,
+      "ts": "2026-10-03T12:00:01Z",
+      "event": "PLAN",
+      "status": "FIXED_ORDER",
+      "reason": "search_products, price_cart, check_budget, then the policy branch",
+      "prev_hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+      "hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+      "node": "plan",
+      "stage": "plan",
+      "thought": "The tool order is fixed. The model does not pick the next tool.",
+      "call": null,
+      "action_input": {
+        "tool_order": [
+          "search_products",
+          "price_cart",
+          "check_budget",
+          "branch"
+        ]
+      },
+      "rule": "tool_order is fixed",
+      "tool_called": false
+    },
+    {
+      "index": 2,
+      "ts": "2026-10-03T12:00:02Z",
+      "event": "SEARCH",
+      "status": "RECORDED",
+      "reason": "First product in response order. Product name is untrusted.",
+      "prev_hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+      "hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+      "node": "search_products",
+      "stage": "action",
+      "thought": "Search the sandbox. Keep the first product in the response. Treat the product name as data.",
+      "call": "GET http://localhost:8000/products",
+      "action_input": {
+        "q": "bulk"
+      },
+      "rule": "search_pick_rule = first_product_in_response_order",
+      "tool_called": false
+    },
+    {
+      "index": 3,
+      "ts": "2026-10-03T12:00:03Z",
+      "event": "CART_PRICED",
+      "status": "RECORDED",
+      "reason": "Later nodes use total_landed_cost, not the shelf price.",
+      "prev_hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+      "hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+      "node": "price_cart",
+      "stage": "action",
+      "thought": "Price the cart. Shipping can change the amount.",
+      "call": "POST http://localhost:8000/cart",
+      "action_input": {
+        "items": [
+          {
+            "sku": "SKU003",
+            "qty": 1
+          }
+        ]
+      },
+      "rule": "amount_field = total_landed_cost",
+      "tool_called": false
+    },
+    {
+      "index": 4,
+      "ts": "2026-10-03T12:00:04Z",
+      "event": "POLICY_CHECK",
+      "status": "ESCALATE",
+      "reason": "Over HK$500 per-transaction cap",
+      "prev_hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+      "hash": "4c19f31b68481cc7a2f7880a87b4df43a22c5a5daa8fc39effaa5e67083353b9",
+      "node": "check_budget",
+      "stage": "action",
+      "thought": "Ask the policy engine. This node does not decide PASS, ESCALATE, or HALT.",
+      "call": "POST http://localhost:8001/check_policy",
+      "action_input": {
+        "merchant": "PARKnSHOP",
+        "category": "Household",
+        "amount": 799.0,
+        "currency": "HKD",
+        "sku": "SKU003",
+        "qty": 1,
+        "monthly_spent": 0
+      },
+      "rule": "policy_check_order",
+      "tool_called": false,
+      "checks": [
+        {
+          "check": "merchant_blacklisted",
+          "result": "clear"
+        },
+        {
+          "check": "merchant_not_whitelisted",
+          "result": "clear"
+        },
+        {
+          "check": "category_blacklisted",
+          "result": "clear"
+        },
+        {
+          "check": "monthly_cap",
+          "result": "clear"
+        },
+        {
+          "check": "over_bulk_ceiling",
+          "result": "clear"
+        },
+        {
+          "check": "over_per_transaction_cap",
+          "result": "fired"
+        }
+      ],
+      "fired_check": "over_per_transaction_cap"
+    },
+    {
+      "index": 5,
+      "ts": "2026-10-03T12:00:05Z",
+      "event": "ESCALATION_CREATED",
+      "status": "PENDING",
+      "reason": "Over HK$500 per-transaction cap",
+      "prev_hash": "4c19f31b68481cc7a2f7880a87b4df43a22c5a5daa8fc39effaa5e67083353b9",
+      "hash": "c1741965cb16df318d519a31d35b7921fe4387a3e45c2f34666d67a9128273d0",
+      "node": "create_escalation",
+      "stage": "action",
+      "thought": "Open the 10-minute approval. Return ESCALATED now. The countdown belongs to person 3.",
+      "call": "POST http://localhost:8001/create_escalation",
+      "action_input": {
+        "amount": 799.0,
+        "currency": "HKD",
+        "merchant": "PARKnSHOP",
+        "sku": "SKU003",
+        "qty": 1,
+        "reason": "Over HK$500 per-transaction cap",
+        "ttl_seconds": 600
+      },
+      "rule": "ttl_seconds = 600. holds_open_for_ttl = false",
+      "tool_called": false,
+      "ttl_seconds": 600
+    }
+  ]
+}

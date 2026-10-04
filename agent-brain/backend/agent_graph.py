@@ -8,10 +8,12 @@ edge runs. Tool calls hit the mall and the policy service.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import operator
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
@@ -20,6 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from benefits import DEFAULT_RANK, connected_methods, explain_pick, settlement_for
 from basket import (
     _blacklist_reply,
+    _is_meal_plan,
     assign_same_merchant,
     fit_basket,
     named_merchant,
@@ -30,7 +33,12 @@ from basket import (
     wants_same_merchant,
 )
 from clients import PaymentClient, PolicyClient, engine_thought, policy_snapshot, public_escalation
+from fake_mall import FileMall
+from meal_plan import alternatives as meal_alternatives
+from meal_plan import describe_lines, is_meal_intent, plan_meal
 from models import ActionPlan
+from draft_store import DraftStore
+from pathlib import Path
 from openrouter import OpenRouterPlanner, normalize_react
 from pick import goal_from, planner_shelf, resolve_pick
 
@@ -62,7 +70,7 @@ _PREVIEW_ONLY = re.compile(
 _MAX_TOTAL = re.compile(
     r"(?:do not spend more than|don't spend more than|no more than|not more than|"
     r"maximum(?: delivered total)?(?: is| of)?|max(?:imum)?(?: spend)?(?: is| of)?|"
-    r"under|within|budget(?: is| of)?|limit(?: is| of)?)\s*"
+    r"under|within|at most|up to|budget(?: is| of)?|limit(?: is| of)?)\s*"
     r"(?:HK\$|HKD|\$)?\s*(\d+(?:\.\d{1,2})?)\b",
     re.IGNORECASE,
 )
@@ -94,6 +102,10 @@ class AgentState(TypedDict, total=False):
     policy_events: list
     basket_policy: dict
     llm_react: list
+    decision_events: list
+    model_tools_used: bool
+    meal: dict
+    run_id: str
     plan_status: str
     stop: bool
     preview_only: bool
@@ -186,7 +198,8 @@ def _product(raw: dict) -> dict:
         "currency": raw.get("currency", "HKD"),
         "merchant": raw["merchant"],
         "category": raw["category"],
-        "stock": int(raw.get("stock", 0)),
+        # Most rows in hk_products_full.json carry "stock": null.
+        "stock": int(raw.get("stock") or 0),
         "image_url": raw.get("image_url") or "",
         "sell_point": raw.get("sell_point") or "",
     }
@@ -218,16 +231,21 @@ def _quote(raw: dict) -> dict:
 
 
 def build_react(audit_log: list[dict], goal: dict | None, llm_react: list | None) -> list[dict]:
-    """Thought, action, observation. The model's own steps come first, then each tool."""
+    """Thought, action, observation. Reasoning steps come first, then each tool.
+
+    Each reasoning step keeps its own source: "llm" when a model wrote it,
+    "optimizer" when the deterministic meal planner computed it.
+    """
     steps = []
     for item in llm_react or []:
         if isinstance(item, dict) and (item.get("thought") or item.get("observation")):
+            source = str(item.get("source") or "llm")
             steps.append(
                 {
                     "thought": str(item.get("thought") or ""),
                     "action": str(item.get("action") or "reason"),
                     "observation": str(item.get("observation") or ""),
-                    "source": "llm",
+                    "source": source if source in {"llm", "optimizer", "catalog", "scripted", "agent"} else "llm",
                 }
             )
     model = str((goal or {}).get("model") or "")
@@ -251,6 +269,10 @@ def build_react(audit_log: list[dict], goal: dict | None, llm_react: list | None
             source = "catalog"
         elif entry.get("event") == "INTENT_RECEIVED" and model == "scripted":
             source = "scripted"
+        elif entry.get("event") == "INTENT_RECEIVED" and model.startswith("meal"):
+            # The meal planner is deterministic code. It used to be labelled
+            # "llm" here even though no model was called.
+            source = "optimizer"
         elif entry.get("event") == "INTENT_RECEIVED" and model:
             source = "llm"
         else:
@@ -511,10 +533,36 @@ def _plan_shell(intent: str, status: str, **fields) -> dict:
         "payment_reason": "",
         "question": fields.get("question") or "",
         "reply": fields.get("reply") or "",
-        "react": [],
+        "react": fields.get("react") or [],
+        "meal": fields.get("meal"),
         "audit_log": audit,
     }
     return ActionPlan.model_validate(plan).model_dump()
+
+
+def _band_steps(meal: dict | None, quote: dict, settlement: dict) -> list[dict]:
+    """One reasoning step on the spend band after the shopper edits a meal basket."""
+    if not meal or meal.get("minimum") is None:
+        return []
+    charge = float(settlement.get("total") or 0)
+    under = meal.get("under_min")
+    if under:
+        thought = (
+            f"The edited basket is under the minimum: HK${under['charge']:.2f} is HK${under['short_by']:.2f} "
+            f"below the HK${under['minimum']:.2f} minimum ({under['basis']}). That is the shopper's choice, "
+            "so I warn and do not block."
+        )
+        observation = (
+            f"Under minimum by HK${under['short_by']:.2f}: charge HK${under['charge']:.2f}, "
+            f"minimum HK${under['minimum']:.2f}."
+        )
+    else:
+        thought = (
+            f"The edited basket charges HK${charge:.2f}, inside the HK${float(meal['minimum']):.2f} minimum "
+            f"and HK${float(meal.get('ceiling') or 0):.2f} target."
+        )
+        observation = f"In band: charge HK${charge:.2f}."
+    return [{"thought": thought, "action": "check_spend_band", "observation": observation, "source": "optimizer"}]
 
 
 def _caps_from(profile: dict | None) -> dict:
@@ -643,14 +691,187 @@ def _order_snapshot(state: AgentState, step: str) -> dict:
 
 
 class ShoppingAgent:
-    def __init__(self, mall, policy: PolicyClient, planner=None, spend=None, profile=None, payments: PaymentClient | None = None):
+    def __init__(
+        self,
+        mall,
+        policy: PolicyClient,
+        planner=None,
+        spend=None,
+        profile=None,
+        payments: PaymentClient | None = None,
+        enricher=None,
+        draft_path: str | None = None,
+    ):
         self.mall = mall
         self.policy = policy
         self.spend = spend
         self.profile = profile
         self.payments = payments
+        self.tools = {"optimize_basket": self.optimize_basket}
+        self.tool_schemas = [{"type": "function", "function": {
+            "name": "optimize_basket",
+            "description": "Compare merchant allocations for existing quantities using the trusted catalog and shopper benefits. Returns a bounded-search quote; does not charge or approve payment.",
+            "parameters": {"type": "object", "properties": {
+                "intent": {"type": "string"},
+                "lines": {"type": "array", "items": {"type": "object", "properties": {
+                    "sku": {"type": "string"}, "qty": {"type": "integer", "minimum": 1}},
+                    "required": ["sku", "qty"], "additionalProperties": False}},
+            }, "required": ["intent", "lines"], "additionalProperties": False},
+        }}]
         self.planner = planner or OpenRouterPlanner()
+        # Optional LLM pass that explains a meal basket the optimiser built.
+        # It never changes items, quantities or prices. Default: the OpenRouter
+        # planner's enrich_meal_plan (skipped when no key is set). Pass
+        # enricher=False to turn it off.
+        if enricher is None and isinstance(self.planner, OpenRouterPlanner):
+            enricher = self.planner.enrich_meal_plan
+        self.enricher = enricher or None
+        # payment_id -> basket that was drafted, so a capture can be saved as a paid order.
+        if draft_path is None and isinstance(payments, PaymentClient):
+            draft_path = os.environ.get("AGENT_DRAFT_DB") or str(Path(__file__).parent / "data" / "drafts.sqlite3")
+        self._drafts = DraftStore(draft_path) if draft_path else {}
+        from decision_journal import DecisionJournal
+        self.decision_journal = DecisionJournal(draft_path or str(Path(__file__).parent / "data" / "decisions.sqlite3"))
         self.graph = self._build()
+
+    @staticmethod
+    def _tags(state: AgentState, stage: str = "intent") -> dict:
+        return {
+            "account_id": state.get("account_id") or "",
+            "run_id": state.get("run_id") or state.get("order_id") or "",
+            "stage": stage,
+        }
+
+    def _shipping(self) -> tuple[float, float]:
+        rules = getattr(self.mall, "rules", None) or {}
+        try:
+            return (
+                float(rules.get("free_shipping_threshold", 400)),
+                float(rules.get("shipping_fee_below_threshold", rules.get("shipping_fee", 30))),
+            )
+        except (TypeError, ValueError, AttributeError):
+            return (400.0, 30.0)
+
+    def _meal_context(self, state: AgentState) -> dict:
+        caps = dict(state.get("policy_caps") or {})
+        caps["monthly_spent"] = float(state.get("monthly_spent") or 0)
+        return {
+            "methods": (state.get("profile") or {}).get("payment_methods"),
+            "benefit_rank": _benefit_rank(state),
+            "caps": caps,
+            "shipping": self._shipping(),
+        }
+
+    def _enrich_meal(self, state: AgentState, decision: dict, catalog: list[dict]) -> dict:
+        """Let the model explain the optimiser's basket. Validate everything it says."""
+        meal = dict(decision.get("meal") or {})
+        steps = list(decision.get("react_steps") or [])
+        if self.enricher is None or not decision.get("needs"):
+            meal["llm"] = {"used": False, "reason": "no enricher configured"}
+            return {**decision, "meal": meal, "llm_react": steps}
+        by_sku = {str(row.get("id")): row for row in catalog}
+        brief = {
+            "request": meal.get("request"),
+            "ceiling_hkd": meal.get("ceiling"),
+            "minimum_hkd": meal.get("minimum"),
+            "strategy": meal.get("strategy"),
+            "coverage": meal.get("coverage"),
+            "payment": [
+                {key: row.get(key) for key in ("merchant", "label", "route", "amount", "benefits")}
+                for row in meal.get("payment") or []
+            ],
+            "benefit_rank": _benefit_rank(state),
+            "planned_charge_hkd": meal.get("planned_total"),
+            "lines": [
+                {
+                    "sku": need["sku"],
+                    "name": (by_sku.get(need["sku"]) or {}).get("name") or need.get("query"),
+                    "group": need.get("group"),
+                    "qty": need.get("qty"),
+                    "unit_price_hkd": (by_sku.get(need["sku"]) or {}).get("price"),
+                }
+                for need in decision["needs"]
+            ],
+        }
+        try:
+            enriched = self.enricher(state["intent"], brief)
+        except Exception as exc:  # no key, network, bad JSON: the optimiser result stands
+            meal["llm"] = {"used": False, "reason": str(exc)[:200]}
+            return {**decision, "meal": meal, "llm_react": steps}
+        checked = enriched.get("parse_check") or {}
+        request = meal.get("request") or {}
+        overrides = {}
+        agreement = {}
+        for key, field, source in (("days", "days", "days_source"), ("family_size", "family", "family_source")):
+            seen = checked.get(key)
+            if not seen:
+                continue
+            mine = request.get(key)
+            agreement[key] = {"optimizer": mine, "llm": seen["value"], "grounded": seen["grounded"]}
+            # Only a value the sentence really contains can replace a default.
+            if seen["grounded"] and request.get(source) == "default" and seen["value"] != mine and 0 < seen["value"] <= 31:
+                overrides[field] = int(seen["value"])
+                overrides[source] = "llm"
+        for key, mine in (("max_hkd", request.get("max_total")), ("min_hkd", request.get("min_total"))):
+            seen = checked.get(key)
+            if seen:
+                agreement[key] = {"optimizer": mine, "llm": seen["value"], "grounded": seen["grounded"]}
+        if overrides:
+            redone = plan_meal(state["intent"], catalog, overrides=overrides, **self._meal_context(state))
+            if redone.get("needs"):
+                decision = redone
+                meal = dict(redone.get("meal") or {})
+                steps = list(redone.get("react_steps") or [])
+        notes = enriched.get("notes") or {}
+        needs = []
+        for need in decision["needs"]:
+            note = notes.get(need["sku"])
+            if note:
+                need = {**need, "reason": f"{need['reason']} Meal idea (model): {note}"}
+            needs.append(need)
+        meal["llm"] = {
+            "used": True,
+            "model": enriched.get("model"),
+            "notes": len(notes),
+            "dropped": enriched.get("dropped", 0),
+            "parse_check": agreement,
+            "overrides": {k: v for k, v in overrides.items() if not k.endswith("_source")},
+            "summary": enriched.get("summary") or "",
+        }
+        reply = str(decision.get("reply") or "")
+        if enriched.get("summary"):
+            reply = f"{reply} Model note: {enriched['summary']}"
+        return {
+            **decision,
+            "needs": needs,
+            "reply": reply,
+            "meal": meal,
+            "model": f"meal+llm:{enriched.get('model')}",
+            "llm_react": [*(enriched.get("react") or []), *steps],
+        }
+
+    def _draft_basket(self, *, settlement: dict, account_id: str, intent: str, sku: str = "", qty: int = 1) -> dict | None:
+        groups = settlement.get("merchants") or []
+        if not self.payments or not groups or any(not group.get("payment", {}).get("route") for group in groups):
+            return None
+        from benefits import current_rules
+        if isinstance(self.payments, PaymentClient) and current_rules() is not None:
+            paid_lines = [line for group in groups for line in group.get("lines", []) if not line.get("is_gift")]
+            return self.payments._request("POST", "/payment/basket/draft", {
+                "account_id": account_id, "intent": intent,
+                "groups": [{"merchant": group["merchant"], "amount": group["payment"]["amount"],
+                            "rail": group["payment"]["route"]} for group in groups],
+                "lines": [{"sku": line["sku"], "qty": line["qty"]} for line in paid_lines],
+            })
+        if len(groups) > 1 and hasattr(self.payments, "draft_basket"):
+            return self.payments.draft_basket(account_id=account_id, intent=intent, groups=groups)
+        return self.payments.draft(amount=float(settlement["total"]), merchant=groups[0]["merchant"],
+                                   account_id=account_id, intent=intent, sku=sku, qty=qty,
+                                   rail=groups[0]["payment"]["route"])
+
+    def basket_alternatives(self, intent: str, sku: str, exclude_skus: list[str] | None = None) -> list[dict]:
+        """Swap options for one basket line, taken from the real catalog only."""
+        return meal_alternatives(intent, sku, self._catalog(), exclude=set(exclude_skus or []))
 
     def _catalog(self) -> list[dict]:
         products = getattr(self.mall, "products", None)
@@ -658,8 +879,24 @@ class ShoppingAgent:
             return products
         return self.mall.search("")
 
+    def _merge_catalog(self, rows: list[dict]) -> None:
+        if not isinstance(self.mall, FileMall):
+            return
+        existing = {row["id"]: row for row in self.mall.products}
+        existing.update({row["id"]: row for row in rows})
+        self.mall.products = list(existing.values())
+        self.mall._by_sku = existing
+
+    def _search_live_catalog(self, **arguments) -> dict:
+        if self.profile is None or not hasattr(self.profile, "search_catalog"):
+            raise ValueError("Live MySQL catalog search is unavailable; no demo catalog was substituted.")
+        arguments = {key: ("" if value is None else value) for key, value in arguments.items()}
+        page = self.profile.search_catalog(**arguments)
+        self._merge_catalog(page["products"])
+        return page
+
     def _resolve_monthly_spent(self, account_id: str, fallback: float) -> float:
-        """Postgres spend is source of truth when persistance :8003 is up."""
+        """MySQL spend is source of truth when persistence :8003 is up."""
         if self.spend is None:
             return float(fallback or 0)
         stored = self.spend.get_monthly_spent(account_id)
@@ -725,7 +962,44 @@ class ShoppingAgent:
         except Exception:
             return
 
-    def run(
+    def _live_rules(self) -> dict | None:
+        if self.profile is None:
+            return None
+        if hasattr(self.profile, "http"):
+            response = self.profile.http.get("/market/rules", timeout=15.0)
+            response.raise_for_status()
+            snapshot = response.json()
+            if "promotions" not in snapshot:
+                promotions = [{"id": f"merchant-{index}", "kind": "percent", "merchant": row["merchant"],
+                               "threshold": row["threshold"], "rate": float(row["percent"]) / 100,
+                               "enabled": True} for index, row in enumerate(snapshot.get("merchant_discounts", []))]
+                for index, row in enumerate(snapshot.get("sku_gifts", [])):
+                    item = self.profile.http.get(f"/catalog/products/{row['sku']}", timeout=15.0)
+                    item.raise_for_status()
+                    product = item.json()
+                    self._merge_catalog([product])
+                    promotions.append({"id": f"gift-{index}", "kind": "bogo", "merchant": product["merchant"],
+                                       "sku": row["sku"], "threshold": 0, "enabled": True,
+                                       "buy_qty": 1, "gift_qty": 1})
+                snapshot = {**snapshot, "promotions": promotions}
+            return snapshot
+        if hasattr(self.profile, "market_rules"):
+            return self.profile.market_rules()
+        return None
+
+    def run(self, intent: str, monthly_spent: float, escalation_id: str | None,
+            account_id: str | None = None) -> dict:
+        from benefits import rules_context
+        try:
+            rules = self._live_rules()
+        except Exception as exc:
+            return _plan_shell(intent, "FAILED", reply=f"Shared market rules are unavailable: {exc}")
+        if rules is not None:
+            with rules_context(rules):
+                return self._run_impl(intent, monthly_spent, escalation_id, account_id)
+        return self._run_impl(intent, monthly_spent, escalation_id, account_id)
+
+    def _run_impl(
         self,
         intent: str,
         monthly_spent: float,
@@ -746,6 +1020,7 @@ class ShoppingAgent:
                 "account_id": account,
                 "escalation_id": escalation_id or "",
                 "order_id": order_id or "",
+                "run_id": order_id or "run_" + uuid.uuid4().hex[:12],
                 "profile": shopper or {},
                 "policy_caps": _caps_from(shopper),
                 "preview_only": bool(_PREVIEW_ONLY.search(intent)),
@@ -773,6 +1048,7 @@ class ShoppingAgent:
             "question": result.get("question") or "",
             "reply": result.get("reply") or "",
             "react": build_react(result.get("audit_log") or [], result.get("goal"), result.get("llm_react")),
+            "meal": result.get("meal"),
             "audit_log": result.get("audit_log", []),
         }
         plan = ActionPlan.model_validate(plan).model_dump()
@@ -782,6 +1058,8 @@ class ShoppingAgent:
     def _audit(self, name: str):
         def audit(state: AgentState) -> dict:
             queued = state.get("policy_events") if name == "audit_policy" else None
+            if name == "audit_intent" and state.get("decision_events"):
+                queued = [*state["decision_events"], state["pending_event"]]
             if queued:
                 log = list(state.get("audit_log") or [])
                 stamped = []
@@ -805,16 +1083,22 @@ class ShoppingAgent:
         if not escalation_id:
             return {"path": ["route_entry"]}
         record = self.policy.get_escalation(escalation_id)
-        if record is None:
+        if record is None or (record.get("account_id") and record["account_id"] != state.get("account_id")):
             return {
                 "path": ["route_entry"],
                 "escalation_status": "UNKNOWN",
             }
+        snapshot = self._drafts.get(escalation_id) or {}
+        if snapshot and snapshot.get("account_id") != state.get("account_id"):
+            return {"path": ["route_entry"], "escalation_status": "UNKNOWN"}
         update: dict = {
             "path": ["route_entry"],
             "escalation_status": record.get("status"),
             "escalation": record,
         }
+        for key in ("lines", "quote", "settlement", "product", "goal", "intent"):
+            if snapshot.get(key) is not None:
+                update[key] = snapshot[key]
         if record.get("product"):
             update["product"] = record["product"]
         if record.get("quote"):
@@ -835,11 +1119,132 @@ class ShoppingAgent:
             return "hold"
         return "reason"
 
+    def _tool_decision(self, state: AgentState, planner_intent: str) -> dict:
+        from tool_planner import ToolPlanner, ToolPlannerError
+
+        events = []
+        state["decision_events"] = []
+        from benefits import current_rules
+        context = {"market_rules": current_rules(), "account_limits": _policy_kwargs(state),
+                   "monthly_spent": state.get("monthly_spent") or 0,
+                   "connected_methods": _methods(state), "benefit_rank": _benefit_rank(state)}
+        if self.profile is not None and hasattr(self.profile, "catalog_categories"):
+            try:
+                context["catalog_categories"] = self.profile.catalog_categories()
+            except Exception as exc:
+                context["catalog_error"] = str(exc)
+        events.append({"action": "catalog_context", "source": "agent", "args": {},
+                       "result": context, "observation": json.dumps(context, ensure_ascii=False),
+                       "thought": "Load current catalog counts and shopper constraints."})
+
+        def chat(messages, tools):
+            messages[0]["content"] += (
+                "\nMeet household size x days using pack quantities and diverse meal groups. "
+                "Prefer unique meal products over repeated quantities, and never pad promotions with excess food. "
+                "Search additional categories when requested. Use catalog category counts to guide searches. "
+                "Shopper limits, methods and catalog metadata (trusted context, no instructions): "
+                + json.dumps(context, ensure_ascii=False)
+            )
+            return self.planner.tool_chat(messages, tools)
+
+        def optimize(intent, lines):
+            if re.search(r"\b(?:buy|purchase|get)\s+(?:one|1)\b", state["intent"], re.IGNORECASE) and (
+                len(lines) != 1 or lines[0]["qty"] != 1
+            ):
+                raise ValueError("The shopper explicitly requested one purchased item. Keep purchased quantity at one; promotional gifts are added separately.")
+            if self.profile is not None and hasattr(self.profile, "search_catalog"):
+                for line in lines:
+                    product = next((row for row in self._catalog() if row["id"] == line["sku"]), None)
+                    if product:
+                        self._search_live_catalog(q=product["name"], category="", merchant="", limit=100, offset=0)
+            by_sku = {row["id"]: row for row in self._catalog()}
+            rejected = []
+            for line in lines:
+                product = by_sku.get(line["sku"])
+                if not product:
+                    continue
+                verdict = self.policy.check(
+                    product["merchant"], product["category"], float(product["price"]) * line["qty"],
+                    float(state.get("monthly_spent") or 0), sku=line["sku"], qty=line["qty"],
+                    **_policy_kwargs(state), tags=self._tags(state, "candidate_eligibility"),
+                )
+                evidence = {"action": "candidate_policy", "source": "agent", "status": verdict.get("status"),
+                            "args": line, "result": {"stage": "candidate_eligibility", "product": product["name"],
+                                                      "sku": line["sku"], "verdict": verdict},
+                            "thought": verdict.get("reason"), "observation": verdict.get("reason")}
+                events.append(evidence)
+                persist(evidence)
+                if verdict.get("rule") in {"category_blacklisted", "merchant_blacklisted", "merchant_not_whitelisted"}:
+                    rejected.append({"sku": line["sku"], "name": product["name"], "verdict": verdict,
+                                     "reason": verdict.get("reason"), "action": "replace_candidate"})
+            if rejected:
+                raise ValueError("Candidate items failed policy. Keep valid items, search suitable replacements and explain each replacement: "
+                                 + json.dumps(rejected, ensure_ascii=False))
+            result = self.tools["optimize_basket"](state["intent"], lines, account_id=state.get("account_id"))
+            if not result["optimization"].get("feasible"):
+                raise ValueError("No evaluated allocation fits stock, connected payment methods and the charged budget band. Revise the basket.")
+            for selected in result["lines"]:
+                if selected.get("is_gift"):
+                    continue
+                verdict = self.policy.check(selected["merchant"], selected["category"], selected["line_total"],
+                                            float(state.get("monthly_spent") or 0), sku=selected["sku"],
+                                            qty=selected["qty"], **_policy_kwargs(state),
+                                            tags=self._tags(state, "optimized_eligibility"))
+                if verdict.get("rule") in {"category_blacklisted", "merchant_blacklisted", "merchant_not_whitelisted"}:
+                    raise ValueError(f"Optimized item {selected['sku']} failed policy: {verdict['reason']}. Search an allowed replacement.")
+            return result
+
+        journal_run = state.get("run_id") or state.get("order_id") or uuid.uuid4().hex
+        def persist(event):
+            self.decision_journal.append(journal_run, state.get("account_id") or "demo", event)
+        persist(events[0])
+        def record_event(event):
+            events.append(event)
+            persist(event)
+        planner = ToolPlanner(chat, self._search_live_catalog, optimize,
+                              model=getattr(self.planner, "model", None) or "llm-tools", on_event=record_event,
+                              rules=current_rules())
+        try:
+            decision = planner(state["intent"])
+        except ToolPlannerError as exc:
+            self._queue_decision_events(state, events)
+            raise
+        self._queue_decision_events(state, events)
+        return decision
+
+    def _queue_decision_events(self, state: AgentState, events: list[dict]) -> None:
+        queued = []
+        for event in events:
+            evidence = {**event, "account_id": state.get("account_id"),
+                        "run_id": state.get("run_id"), "order_id": state.get("order_id")}
+            queued.append(_pending(
+                "MODEL_DECISION" if event.get("source") == "llm" else "TOOL_RESULT",
+                str(event.get("status") or "RECORDED").upper(),
+                json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                event.get("thought") or f"Called {event.get('action')}", evidence,
+            ))
+        state["decision_events"] = queued
+
     def _reason(self, state: AgentState) -> dict:
+        update = self._reason_impl(state)
+        if state.get("decision_events"):
+            update["decision_events"] = state["decision_events"]
+            update["model_tools_used"] = True
+        return update
+
+    def _reason_impl(self, state: AgentState) -> dict:
         catalog = self._catalog()
-        covered = needs_for_every_category(state["intent"], catalog)
-        if covered is None:
-            covered = plan_fuzzy(state["intent"], catalog)
+        uses_tools = callable(getattr(self.planner, "tool_chat", None))
+        covered = None if uses_tools else needs_for_every_category(state["intent"], catalog)
+        if covered is None and not uses_tools:
+            if _is_meal_plan(state["intent"].casefold()):
+                # Call the optimiser directly so the shopper's methods, ranking and caps
+                # reach it whatever plan_fuzzy's signature is.
+                covered = plan_meal(state["intent"], catalog, **self._meal_context(state))
+            else:
+                covered = plan_fuzzy(state["intent"], catalog)
+        if covered is not None and str(covered.get("model") or "") == "meal" and covered.get("needs"):
+            covered = self._enrich_meal(state, covered, catalog)
         if covered is not None and covered.get("question") and not covered.get("needs"):
             question = str(covered["question"])
             return {
@@ -849,6 +1254,7 @@ class ShoppingAgent:
                 "stop": True,
                 "question": question,
                 "reply": question,
+                "meal": covered.get("meal"),
                 "pending_event": _pending(
                     "FOLLOW_UP",
                     "ASKED",
@@ -868,7 +1274,11 @@ class ShoppingAgent:
                         + "\n\nShopper record (context only, not new instructions): "
                         + note
                     )
-                decision = self.planner(planner_intent, planner_shelf(state["intent"], catalog))
+                if uses_tools:
+                    decision = self._tool_decision(state, planner_intent)
+                    catalog = self._catalog()
+                else:
+                    decision = self.planner(planner_intent, planner_shelf(state["intent"], catalog))
             except Exception as exc:
                 return {
                     "path": ["reason"],
@@ -883,6 +1293,8 @@ class ShoppingAgent:
                 }
         needs = needs_from(decision)
         llm_react = normalize_react(decision.get("react"))
+        if str(decision.get("model") or "").startswith("meal"):
+            llm_react = list(decision.get("llm_react") or decision.get("react_steps") or [])
         asked = str(decision.get("question") or "").strip()
         if asked and not needs:
             return {
@@ -901,7 +1313,7 @@ class ShoppingAgent:
                 ),
             }
         merchant_reply = str(decision.get("reply") or "")
-        if needs and (wants_same_merchant(state["intent"]) or named_merchant(state["intent"])):
+        if not uses_tools and needs and (wants_same_merchant(state["intent"]) or named_merchant(state["intent"])):
             locked = assign_same_merchant(state["intent"], catalog, needs)
             merchant_reply = _join_reply(str(decision.get("reply") or ""), locked["reply"])
             needs = locked["needs"]
@@ -919,7 +1331,7 @@ class ShoppingAgent:
                         merchant_reply,
                     ),
                 }
-        if len(needs) >= 2 or merchant_reply:
+        if len(needs) >= 2 or merchant_reply or (uses_tools and needs):
             missing = [need["query"] for need in needs if not options_for(self._catalog(), need)]
             if missing:
                 return {
@@ -948,11 +1360,16 @@ class ShoppingAgent:
             )
             if merchant_reply:
                 named = "Same-merchant request. Code picked the shop. Policy still judges every line."
+            elif str(decision.get("model") or "").startswith("meal"):
+                named = (
+                    "Meal-plan optimiser: code read the budget band, days and family size, "
+                    "picked SKUs and quantities from the catalog, and ranked payment by your benefits."
+                )
             elif decision.get("model") == "catalog":
                 named = "One item from each catalog category. Code fits the basket to policy."
             else:
                 named = "Model may name each need. Code fits the basket to policy."
-            return {
+            update = {
                 "path": ["reason"],
                 "goal": goal,
                 "needs": needs,
@@ -960,6 +1377,13 @@ class ShoppingAgent:
                 "llm_react": llm_react,
                 "pending_event": _pending("INTENT_RECEIVED", "PARSED", named, goal["thought"]),
             }
+            if decision.get("meal"):
+                meal = decision["meal"]
+                update["meal"] = meal
+                ceiling = (meal.get("request") or {}).get("max_total")
+                if ceiling is not None and state.get("user_max_total") is None:
+                    update["user_max_total"] = float(ceiling)
+            return update
         try:
             chosen = resolve_pick(self._catalog(), decision)
         except Exception as exc:
@@ -1005,25 +1429,44 @@ class ShoppingAgent:
         return "end" if state.get("stop") else "plan"
 
     def _plan(self, state: AgentState) -> dict:
+        meal = state.get("meal") or {}
+        thought = None
+        if meal.get("strategy"):
+            thought = (
+                f"Price the {len(state.get('needs') or [])} optimiser lines from {meal['strategy']}, "
+                f"then let the policy engine judge every line and the total before the shopper sees it."
+            )
         return {
             "path": ["plan"],
             "pending_event": _pending(
                 "PLAN",
                 "FIXED_ORDER",
                 "search_products, price_cart, check_budget, then the policy branch",
+                thought,
             ),
         }
 
     def _search(self, state: AgentState) -> dict:
         if state.get("needs"):
             count = len(state["needs"])
+            thought = f"Shelf search kept {count} products."
+            groups: dict[str, int] = {}
+            for need in state["needs"]:
+                if need.get("group"):
+                    groups[need["group"]] = groups.get(need["group"], 0) + 1
+            if groups:
+                thought = (
+                    f"All {count} SKUs exist in the catalog with a live price: "
+                    + ", ".join(f"{name} {n}" for name, n in groups.items())
+                    + "."
+                )
             return {
                 "path": ["search_products"],
                 "pending_event": _pending(
                     "SEARCH",
                     "RECORDED",
                     f"Basket of {count} needs.",
-                    f"Shelf search kept {count} products.",
+                    thought,
                 ),
             }
         chosen = state.get("product") or {}
@@ -1085,7 +1528,7 @@ class ShoppingAgent:
         caps = _policy_kwargs(state)
 
         def policy_check(lines, amount, spent):
-            return self.policy.check_lines(lines, amount, spent, **caps)
+            return self.policy.check_lines(lines, amount, spent, **caps, tags=self._tags(state))
 
         try:
             fitted = fit_basket(
@@ -1099,6 +1542,26 @@ class ShoppingAgent:
             )
         except Exception:
             return _failure("price_cart", "CART_PRICED", "Mall cart failed")
+        allocation_step = None
+        if not state.get("model_tools_used") and not state.get("meal") and fitted["lines"] and not any(need.get("merchant") for need in state["needs"]):
+            try:
+                optimized = self.tools["optimize_basket"](
+                    state["intent"], fitted["lines"], account_id=state.get("account_id"),
+                )
+                allocation_step = {"thought": "Compare merchant allocations for the requested items.",
+                                   "action": "optimize_basket", "source": "optimizer",
+                                   "observation": optimized["optimization"]["explanation"]}
+                if optimized["optimization"]["feasible"] and any(
+                    old["sku"] != new["sku"] for old, new in zip(fitted["lines"], optimized["lines"])
+                ):
+                    needs = [{"sku": line["sku"], "query": line["name"], "qty": line["qty"],
+                              "priority": index + 1, "reason": f"Same product and quantity; {line['merchant']} was selected by the whole-basket cost comparison."}
+                             for index, (old, line) in enumerate(zip(fitted["lines"], optimized["lines"]))]
+                    fitted = fit_basket(self._catalog(), needs, float(state.get("monthly_spent") or 0),
+                                        self.mall.cart_lines, policy_check, methods=_methods(state),
+                                        benefit_rank=_benefit_rank(state))
+            except ValueError as exc:
+                return _failure("price_cart", "CART_PRICED", str(exc))
         try:
             requested = [{"sku": line["sku"], "qty": int(line["qty"])} for line in fitted["lines"]]
             _verify_cart_quote(fitted["quote"], requested, self._catalog())
@@ -1106,19 +1569,40 @@ class ShoppingAgent:
             return _failure("price_cart", "CART_PRICED", str(exc))
         first = fitted["lines"][0]
         fresh = self.mall.product(first["sku"])
+        route = fitted["payment_route"]
+        route_reason = fitted["payment_reason"]
+        meal = state.get("meal") or {}
+        if meal.get("payment"):
+            chosen = meal["payment"][0]
+            route = chosen.get("route") or route
+            route_reason = (
+                f"{chosen.get('label')} chosen by benefits.quote_tender from your connected methods for "
+                + ", ".join(f"{row.get('merchant')} ({row.get('label')})" for row in meal["payment"])
+                + "."
+            )
+        quote = _quote(fitted["quote"])
         return {
             "path": ["price_cart"],
-            "quote": _quote(fitted["quote"]),
+            "quote": quote,
             "product": _product(fresh),
             "lines": fitted["lines"],
             "repairs": fitted["repairs"],
+            "llm_react": [*(state.get("llm_react") or []), *([allocation_step] if allocation_step else [])],
             "question": fitted["question"],
             "reply": _join_reply(state.get("reply") or "", fitted.get("reply") or ""),
-            "payment_route": fitted["payment_route"],
-            "payment_reason": fitted["payment_reason"],
+            "payment_route": route,
+            "payment_reason": route_reason,
             "basket_policy": fitted["policy"],
             "policy_events": fitted["events"],
-            "pending_event": _pending("CART_PRICED", "RECORDED", fitted["cart_reason"]),
+            "pending_event": _pending(
+                "CART_PRICED",
+                "RECORDED",
+                fitted["cart_reason"],
+                (
+                    f"Mall priced {len(fitted['lines'])} lines: goods HK${quote['subtotal']:.2f}, "
+                    f"shipping HK${quote['shipping_fee']:.2f}, landed HK${quote['total_landed_cost']:.2f}."
+                ),
+            ),
         }
 
     def _after_cart(self, state: AgentState) -> str:
@@ -1159,6 +1643,7 @@ class ShoppingAgent:
             sku=product["id"],
             qty=int(state["goal"]["qty"]),
             **_policy_kwargs(state),
+            tags=self._tags(state),
         )
         return {
             "path": ["check_budget"],
@@ -1196,6 +1681,8 @@ class ShoppingAgent:
             return failed
         lines = _review_lines(state)
         settlement = settlement_for(lines, state.get("quote") or {}, _methods(state), _benefit_rank(state))
+        from benefits import gift_lines
+        lines = [*lines, *gift_lines(lines)]
         total = settlement.get("total")
         review = (
             f"Basket total HK${float(total):.2f}. "
@@ -1217,7 +1704,60 @@ class ShoppingAgent:
             ),
         }
 
-    def confirm_basket(
+    def optimize_basket(self, intent: str, lines: list[dict], account_id: str | None = None) -> dict:
+        from benefits import current_rules, rules_context
+        if current_rules() is None:
+            rules = self._live_rules()
+            if rules is not None:
+                with rules_context(rules):
+                    return self._optimize_basket_impl(intent, lines, account_id)
+        return self._optimize_basket_impl(intent, lines, account_id)
+
+    def _optimize_basket_impl(self, intent: str, lines: list[dict], account_id: str | None = None) -> dict:
+        """Read-only tool: allocate existing item quantities across merchant offers."""
+        from basket_optimizer import optimize_basket
+        from meal_plan import parse_request, WHITELIST
+
+        account = (account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        profile = self._load_profile(account) or {}
+        request = parse_request(intent)
+        allowed = set(request.merchants or WHITELIST)
+        catalog = [row for row in self._catalog() if row.get("merchant") in allowed]
+        by_id = {row["id"]: row for row in catalog}
+        detailed = []
+        for line in lines:
+            sku = str(line.get("sku") or "")
+            qty = int(line.get("qty") or 0)
+            if sku not in by_id or qty < 1:
+                raise ValueError("Each optimizer line needs an allowed catalog SKU and a positive quantity.")
+            product = by_id[sku]
+            detailed.append({"sku": sku, "name": product["name"], "merchant": product["merchant"],
+                             "category": product["category"], "qty": qty,
+                             "unit_price": product["price"], "line_total": round(product["price"] * qty, 2)})
+        if not detailed:
+            raise ValueError("The optimizer needs at least one basket item.")
+        ceiling = min(float(profile.get("bulk_ceiling") or 800),
+                      max(0, float(profile.get("monthly_cap") or 2000) - float(profile.get("monthly_spent") or 0)))
+        if request.max_total is not None:
+            ceiling = min(ceiling, request.max_total)
+        return optimize_basket(detailed, catalog, methods=profile.get("payment_methods"),
+                               rank=_benefit_rank({"profile": profile, "intent": intent}),
+                               max_total=ceiling, min_total=request.min_total, shipping=self._shipping())
+
+    def confirm_basket(self, intent: str, lines: list[dict], removed_skus: list[str] | None = None,
+                       monthly_spent: float = 0, account_id: str | None = None) -> dict:
+        from benefits import rules_context
+        try:
+            rules = self._live_rules()
+        except Exception as exc:
+            return _plan_shell(intent, "NEEDS_INPUT",
+                               question=f"Shared market rules are unavailable: {exc}. Retry before payment.")
+        if rules is not None:
+            with rules_context(rules):
+                return self._confirm_basket_impl(intent, lines, removed_skus, monthly_spent, account_id)
+        return self._confirm_basket_impl(intent, lines, removed_skus, monthly_spent, account_id)
+
+    def _confirm_basket_impl(
         self,
         intent: str,
         lines: list[dict],
@@ -1228,9 +1768,22 @@ class ShoppingAgent:
         """Reprice the edited basket and run policy a second time. No charge yet."""
         account = (account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
         profile = self._load_profile(account) or {}
+        if profile.get("monthly_spent") is not None:
+            # Stored spend is the source of truth, same as run(). The browser's
+            # copy can be stale or missing (it defaulted to 0).
+            monthly_spent = float(profile["monthly_spent"])
+        else:
+            monthly_spent = self._resolve_monthly_spent(account, monthly_spent)
         methods = connected_methods(profile.get("payment_methods"))
-        rank = profile.get("benefit_rank") or DEFAULT_RANK
+        rank = _benefit_rank({"profile": profile, "intent": intent})
         removed = {sku for sku in (removed_skus or []) if sku}
+        if callable(getattr(self.planner, "tool_chat", None)) and self.profile is not None:
+            for line in lines:
+                sku = str(line.get("sku") or "")
+                if sku:
+                    page = self._search_live_catalog(q=sku, category="", merchant="", limit=100, offset=0)
+                    if not any(row["id"] == sku for row in page["products"]):
+                        return _plan_shell(intent, "NEEDS_INPUT", question=f"{sku} is no longer in the live catalog. Choose a replacement.")
         catalog = {row["id"]: row for row in self._catalog()}
         requested = []
         for line in lines:
@@ -1269,12 +1822,72 @@ class ShoppingAgent:
                     "merchant_reason": product.get("merchant_reason") or "",
                 }
             )
+        meal = None
+        settlement = settlement_for(detailed, quote, methods, rank)
+        if is_meal_intent(intent):
+            caps_now = dict(_caps_from(profile))
+            caps_now["monthly_spent"] = float(monthly_spent or 0)
+            described = describe_lines(
+                intent,
+                detailed,
+                catalog,
+                methods=profile.get("payment_methods"),
+                benefit_rank=rank,
+                caps=caps_now,
+                quote=quote,
+                settlement=settlement,
+            )
+            for line in detailed:
+                reason = described["reasons"].get(line["sku"])
+                if reason:
+                    line["product_reason"] = reason
+            meal = {
+                "ceiling": described["ceiling"],
+                "minimum": described["minimum"],
+                "under_min": described["under_min"],
+                "coverage": described["coverage"],
+                "warnings": described["warnings"],
+                "benefits": settlement.get("benefits") or [],
+                "discount": settlement.get("discount") or 0,
+                "payment": [
+                    {
+                        "merchant": group.get("merchant"),
+                        "route": (group.get("payment") or {}).get("route"),
+                        "label": (group.get("payment") or {}).get("label"),
+                        "last4": (group.get("payment") or {}).get("last4"),
+                        "amount": (group.get("payment") or {}).get("amount"),
+                        "benefits": group.get("benefits") or [],
+                        "because": group.get("because") or "",
+                    }
+                    for group in settlement.get("merchants") or []
+                ],
+            }
+        confirm_run = "cfm_" + uuid.uuid4().hex[:12]
         result, events = self.policy.check_lines(
             detailed,
             quote["total_landed_cost"],
             float(monthly_spent or 0),
             **_policy_kwargs({"policy_caps": _caps_from(profile)}),
+            tags={"account_id": account, "run_id": confirm_run, "stage": "confirm"},
         )
+        from benefits import current_rules, gift_lines
+        if current_rules() is not None:
+            evidence = {"action": "confirm_market_quote", "stage": "confirm", "market_rules": current_rules(),
+                        "settlement": settlement, "account_id": account, "run_id": confirm_run}
+            events.insert(0, _pending("TOOL_RESULT", "RECORDED", json.dumps(evidence, sort_keys=True, ensure_ascii=False),
+                                      "Reprice the user basket using the current shared market rules.", evidence))
+        band_steps = _band_steps(meal, quote, settlement)
+        if band_steps:
+            # Visible in the agent's reasoning and the step trace, not only the pop-up.
+            events = [
+                *events,
+                {
+                    "event": "BASKET_REVISED",
+                    "status": "UNDER_MINIMUM" if (meal or {}).get("under_min") else "IN_BAND",
+                    "reason": band_steps[0]["observation"],
+                    "thought": band_steps[0]["thought"],
+                },
+            ]
         if result.get("status") == "HALT":
             suggestion = _suggestion(self._catalog(), detailed, removed, result)
             question = _followup(result, suggestion)
@@ -1287,9 +1900,38 @@ class ShoppingAgent:
                 question=question,
                 reply=question,
                 suggestion=suggestion,
+                settlement=settlement,
+                meal=meal,
+                react=band_steps,
                 audit=_policy_audit(result, events),
             )
-        settlement = settlement_for(detailed, quote, methods, rank)
+        if meal and any("over your" in text for text in meal["warnings"]):
+            # The policy engine passed, but the shopper's own maximum from the
+            # sentence is a hard limit too. Send the basket back for edits.
+            question = " ".join(meal["warnings"]) + " Remove an item or lower a quantity, then confirm again."
+            return _plan_shell(
+                intent,
+                "NEEDS_INPUT",
+                quote=quote,
+                lines=detailed,
+                policy={**result, "status": "HALT", "rule": "user_max_total", "reason": meal["warnings"][0]},
+                question=question,
+                reply=question,
+                settlement=settlement,
+                meal=meal,
+                react=band_steps,
+                audit=_policy_audit(result, events),
+            )
+        maximum = _user_max_total(intent)
+        if maximum is not None and quote["total_landed_cost"] > maximum:
+            reason = f"Quoted landed total HK${quote['total_landed_cost']:.2f} exceeds your HK${maximum:.2f} maximum."
+            return _plan_shell(
+                intent, "NEEDS_INPUT", quote=quote, lines=detailed,
+                policy={**result, "status": "HALT", "rule": "user_max_total", "reason": reason},
+                question=reason + " Remove an item or lower a quantity, then confirm again.",
+                reply=reason, settlement=settlement, meal=meal,
+                audit=_policy_audit(result, events),
+            )
         escalation = None
         if result.get("status") == "ESCALATE":
             first = detailed[0]
@@ -1304,20 +1946,25 @@ class ShoppingAgent:
                     "qty": int(first.get("qty") or 1),
                     "reason": result.get("reason") or "",
                     "monthly_spent": float(monthly_spent or 0),
+                    "account_id": account,
+                    "run_id": confirm_run,
+                    "order_id": confirm_run,
                     **caps,
                 }
             )
+        if escalation:
+            first = detailed[0]
+            self._drafts[escalation["escalation_id"]] = {
+                "account_id": account, "intent": intent, "lines": detailed, "quote": quote,
+                "settlement": settlement, "product": {**catalog[first["sku"]]},
+                "goal": {"intent": intent, "query": first["name"], "qty": int(first["qty"])},
+            }
         draft = None
         if result.get("status") == "PASS" and self.payments is not None:
             merchant = detailed[0].get("merchant") or ""
-            held = self.payments.draft(
-                amount=float(settlement["total"]),
-                merchant=merchant,
-                account_id=account,
-                intent=intent,
-                sku=detailed[0].get("sku") or "",
-                qty=int(detailed[0].get("qty") or 1),
-                rail=(settlement["merchants"][0]["payment"]["route"] if settlement["merchants"] else None),
+            held = self._draft_basket(
+                settlement=settlement, account_id=account, intent=intent,
+                sku=detailed[0].get("sku") or "", qty=int(detailed[0].get("qty") or 1),
             )
             if held and held.get("payment_id"):
                 draft = {
@@ -1332,17 +1979,36 @@ class ShoppingAgent:
                     "step_up_reason": held.get("step_up_reason") or "",
                     "recommendation": held.get("recommendation"),
                 }
+                self._drafts[held["payment_id"]] = {
+                    "account_id": account,
+                    "intent": intent,
+                    "lines": detailed,
+                    "quote": quote,
+                    "settlement": settlement,
+                }
+                # Pending and captured-but-unsaved baskets remain available for recovery.
+        if result.get("status") == "PASS" and self.payments is not None and draft is None:
+            return _plan_shell(intent, "NEEDS_INPUT", quote=quote, lines=detailed, policy=result,
+                               settlement=settlement, meal=meal,
+                               question="Payment service unavailable. Confirm the basket again when it recovers.",
+                               reply="Payment service unavailable. The basket is saved for editing; no charge was made.",
+                               audit=_policy_audit(result, events))
         status = "ESCALATED" if result.get("status") == "ESCALATE" else "READY"
         return _plan_shell(
             intent,
             status,
             quote=quote,
-            lines=detailed,
+            lines=[*detailed, *gift_lines(detailed)],
             policy=result,
             settlement=settlement,
             payment_draft=draft,
             escalation=escalation,
-            reply=f"Rules checked again. Amount to approve is HK${float(settlement['total']):.2f}.",
+            meal=meal,
+            react=band_steps,
+            reply=(
+                f"Rules checked again. Amount to approve is HK${float(settlement['total']):.2f}."
+                + (" " + " ".join(meal["warnings"]) if meal and meal.get("warnings") else "")
+            ),
             audit=_policy_audit(result, events),
         )
 
@@ -1357,8 +2023,11 @@ class ShoppingAgent:
         merchant: str = "",
     ) -> dict:
         """Charge only after the shopper approves. A mismatched gateway amount fails closed."""
-        if self.payments is not None and payment_id:
-            return self.authorize_draft(payment_id, step_up_confirmed=step_up_confirmed, account_id=account_id)
+        if self.payments is not None:
+            if payment_id:
+                return self.authorize_draft(payment_id, step_up_confirmed=step_up_confirmed, account_id=account_id)
+            return {"success": False, "order_id": None, "charged": None, "currency": "HKD",
+                    "payment_route": payment_route, "ts": None, "error": "payment_draft_required", "payment_id": None}
         authorized = _finite_money(amount)
         if authorized is None:
             return {
@@ -1459,21 +2128,27 @@ class ShoppingAgent:
         merchant = str(product.get("merchant") or escalation.get("merchant") or "unknown")
         key = f"{sku}:{qty}:{tag}:{escalation_id}"
         if self.payments is not None:
-            draft = self.payments.draft(
-                amount=authorized_total,
-                merchant=merchant,
-                account_id=state.get("account_id") or "demo",
-                intent=str(state.get("intent") or ""),
-                sku=str(sku or ""),
-                qty=int(qty),
-                rail=route,
+            settlement = state.get("settlement") or settlement_for(_review_lines(state), quote, _methods(state), _benefit_rank(state))
+            draft = self._draft_basket(
+                settlement=settlement, account_id=state.get("account_id") or "demo",
+                intent=str(state.get("intent") or ""), sku=str(sku or ""), qty=int(qty),
             )
             if draft and draft.get("payment_id"):
+                self._drafts[draft["payment_id"]] = {
+                    "account_id": state.get("account_id") or "demo",
+                    "intent": state.get("intent") or "",
+                    "lines": _review_lines(state),
+                    "quote": quote,
+                    "approved_escalation": escalation_id if approved else None,
+                    "settlement": settlement,
+                }
                 held = {
                     "path": ["execute_payment"],
                     "plan_status": "READY",
                     "payment": None,
-                    "payment_route": route,
+                    "payment_route": draft.get("rail") or route,
+                    "settlement": settlement,
+                    "lines": _review_lines(state),
                     "payment_draft": {
                         "payment_id": draft["payment_id"],
                         "status": draft.get("status") or "DRAFT",
@@ -1495,6 +2170,7 @@ class ShoppingAgent:
                 }
                 self._save_workflow(state, "execute_payment", held)
                 return held
+            return _failure("execute_payment", "PAYMENT", "Payment service unavailable. Retry to create a draft before approving.")
         try:
             payment = self.mall.pay(authorized_total, key, route)
         except Exception:
@@ -1534,7 +2210,10 @@ class ShoppingAgent:
         self._save_workflow(state, "execute_payment", paid)
         return paid
 
-    def authorize_draft(self, payment_id: str, step_up_confirmed: bool = False, account_id: str = "demo") -> dict:
+    def recover_payment(self, payment_id: str, account_id: str = "demo") -> dict:
+        return self.authorize_draft(payment_id, account_id=account_id, recover=True)
+
+    def authorize_draft(self, payment_id: str, step_up_confirmed: bool = False, account_id: str = "demo", *, recover: bool = False) -> dict:
         if self.payments is None:
             return {
                 "success": False,
@@ -1546,7 +2225,37 @@ class ShoppingAgent:
                 "error": "payment_offline",
                 "payment_id": payment_id,
             }
-        result = self.payments.authorize(payment_id, step_up_confirmed=step_up_confirmed)
+        held = self._drafts.get(payment_id)
+        if held and held.get("account_id") != account_id:
+            return {"success": False, "order_id": None, "charged": None, "currency": "HKD",
+                    "payment_route": None, "ts": None, "error": "payment_account_mismatch", "payment_id": payment_id}
+        known = self.payments.get_payment(payment_id) if hasattr(self.payments, "get_payment") else None
+        if known and known.get("account_id") and known["account_id"] != account_id:
+            return {"success": False, "order_id": None, "charged": None, "currency": "HKD",
+                    "payment_route": None, "ts": None, "error": "payment_account_mismatch", "payment_id": payment_id}
+        if held and held.get("lines") and not held.get("captured_payment") and (known or {}).get("status") not in {"CAPTURED", "PENDING"}:
+            profile = self._load_profile(account_id) or {}
+            spent = profile.get("monthly_spent")
+            if spent is None:
+                spent = self._resolve_monthly_spent(account_id, 0)
+            quote = held.get("quote") or {}
+            policy, _ = self.policy.check_lines(
+                held["lines"], float(quote.get("total_landed_cost") or (held.get("settlement") or {}).get("shelf_total") or 0),
+                float(spent), **_policy_kwargs({"policy_caps": _caps_from(profile)}),
+            )
+            esc_id = held.get("approved_escalation")
+            esc = self.policy.get_escalation(esc_id) if esc_id else None
+            approved = bool(esc and esc.get("status") == "APPROVED" and
+                            (not esc.get("account_id") or esc["account_id"] == account_id) and
+                            _finite_money(esc.get("amount")) == _finite_money(policy.get("amount")))
+            if policy.get("status") == "HALT" or (policy.get("status") == "ESCALATE" and not approved):
+                return {"success": False, "order_id": None, "charged": None, "currency": "HKD",
+                        "payment_route": None, "ts": None, "error": policy.get("reason") or "policy_changed",
+                        "payment_id": payment_id}
+        if recover:
+            result = self.payments.recover(payment_id)
+        else:
+            result = self.payments.authorize(payment_id, step_up_confirmed=step_up_confirmed)
         if not result:
             return {
                 "success": False,
@@ -1555,8 +2264,10 @@ class ShoppingAgent:
                 "currency": None,
                 "payment_route": None,
                 "ts": None,
-                "error": "authorize_failed",
+                "error": "Payment status is uncertain. Retry using the same draft to check or resume the payment.",
                 "payment_id": payment_id,
+                "retryable": True,
+                "status": "PENDING",
             }
         ok = result.get("status") == "CAPTURED"
         shaped = {
@@ -1568,8 +2279,84 @@ class ShoppingAgent:
             "ts": result.get("rail_ts") or result.get("updated_at"),
             "error": None if ok else (result.get("error") or result.get("detail") or "authorize_failed"),
             "payment_id": result.get("payment_id") or payment_id,
+            "retryable": result.get("status") == "PENDING",
+            "status": result.get("status"),
         }
+        if ok:
+            shaped["settlement_saved"] = self._save_paid(payment_id, shaped, account_id)
+            shaped["settlement_pending"] = shaped["settlement_saved"] is False
         return shaped
+
+    def _save_paid(self, payment_id: str, payment: dict, account_id: str) -> bool | None:
+        """Write the captured basket to persistance as a paid order.
+
+        Before, only the browser saved the order (after authorize). A capture
+        made any other way (script, retry after a closed tab) never reached the
+        order history. persistance dedups on payment_id, so the browser's own
+        save afterwards is a no-op.
+        """
+        held = self._drafts.get(payment_id)
+        if held is None:
+            return None
+        held = {**held, "captured_payment": payment}
+        self._drafts[payment_id] = held
+        if self.profile is None or not hasattr(self.profile, "settle"):
+            return False
+        settlement = dict(held.get("settlement") or {})
+        settlement["payment_order_id"] = payment.get("order_id")
+        lines = [
+            {
+                key: line.get(key)
+                for key in ("sku", "name", "merchant", "category", "qty", "unit_price", "line_total")
+            }
+            for line in held.get("lines") or []
+        ]
+        merchants = [group.get("merchant") for group in settlement.get("merchants") or [] if group.get("merchant")]
+        try:
+            saved = self.profile.settle(
+                held.get("account_id") or account_id,
+                {
+                    "amount": float(payment.get("charged") or settlement.get("total") or 0),
+                    "currency": payment.get("currency") or "HKD",
+                    "merchant": ", ".join(merchants),
+                    "payment_route": payment.get("payment_route") or "",
+                    "payment_id": payment_id,
+                    "intent": held.get("intent") or "",
+                    "lines": lines,
+                    "settlement": settlement,
+                    "benefits": settlement.get("benefits") or [],
+                },
+            )
+        except Exception:
+            return False
+        if not isinstance(saved, dict) or not saved.get("order_id"):
+            return False
+        self._drafts.pop(payment_id, None)
+        return True
+
+    def recover_orders(self, account_id: str) -> dict:
+        recovered = []
+        pending = []
+        for payment_id in list(self._drafts):
+            held = self._drafts.get(payment_id) or {}
+            if held.get("account_id") != account_id:
+                continue
+            if not held.get("captured_payment"):
+                if payment_id.startswith("esc_") or self.payments is None or not hasattr(self.payments, "get_payment"):
+                    continue
+                record = self.payments.get_payment(payment_id)
+                if not record or record.get("status") != "CAPTURED":
+                    continue
+                held["captured_payment"] = {
+                    "success": True, "charged": record.get("charged"), "order_id": record.get("order_id"),
+                    "currency": record.get("currency") or "HKD", "payment_route": record.get("rail"),
+                    "payment_id": payment_id,
+                }
+            if self._save_paid(payment_id, held["captured_payment"], account_id):
+                recovered.append(payment_id)
+            else:
+                pending.append(payment_id)
+        return {"recovered": recovered, "pending": pending}
 
     def _escalate(self, state: AgentState) -> dict:
         product = state["product"]
@@ -1585,6 +2372,9 @@ class ShoppingAgent:
                 "qty": state["goal"]["qty"],
                 "reason": policy["reason"],
                 "monthly_spent": float(state.get("monthly_spent") or 0),
+                "account_id": state.get("account_id") or "",
+                "run_id": state.get("run_id") or "",
+                "order_id": state.get("order_id") or state.get("run_id") or "",
                 "monthly_cap": caps.get("monthly_cap"),
                 "per_transaction_cap": caps.get("per_transaction_cap"),
                 "bulk_ceiling": caps.get("bulk_ceiling"),
@@ -1596,6 +2386,13 @@ class ShoppingAgent:
             }
         )
         stored = self.policy.memory[record["escalation_id"]]
+        self._drafts[record["escalation_id"]] = {
+            "account_id": state.get("account_id") or "demo",
+            "order_id": state.get("order_id") or state.get("run_id") or "",
+            "intent": state.get("intent") or "",
+            "lines": _review_lines(state), "quote": state["quote"],
+            "settlement": state.get("settlement"), "product": product, "goal": state["goal"],
+        }
         return {
             "path": ["create_escalation"],
             "plan_status": "ESCALATED",

@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS audit_entries (
     ts          VARCHAR(32) NOT NULL,
     event       VARCHAR(64) NOT NULL,
     status      VARCHAR(64) NOT NULL,
-    reason      VARCHAR(1024) NOT NULL DEFAULT '',
-    thought     TEXT NOT NULL,
+    reason      LONGTEXT NOT NULL,
+    thought     LONGTEXT NOT NULL,
     prev_hash   CHAR(64) NOT NULL,
     hash        CHAR(64) NOT NULL,
     created_at  DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS payments (
     updated_at        VARCHAR(40) NOT NULL,
     CONSTRAINT payments_amount_chk CHECK (amount > 0),
     CONSTRAINT payments_status_chk CHECK (
-        status IN ('DRAFT', 'AUTHORIZED', 'CAPTURED', 'FAILED', 'REFUNDED')
+        status IN ('DRAFT', 'PENDING', 'AUTHORIZED', 'CAPTURED', 'FAILED', 'REFUNDED')
     )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -291,3 +291,38 @@ CREATE TABLE IF NOT EXISTS benefit_ledger (
 CREATE INDEX benefit_ledger_account_idx ON benefit_ledger (account_id);
 
 INSERT IGNORE INTO schema_migrations (id) VALUES ('005_benefits');
+
+-- Policy verdicts per account (written by backend-policy :8001 on /check_policy
+-- and /create_escalation when the caller sends account_id). The hash-chained
+-- audit ledger has no account id, so the dashboard reads failures from here.
+CREATE TABLE IF NOT EXISTS policy_decisions (
+    id             VARCHAR(32) PRIMARY KEY,
+    ts             VARCHAR(32) NOT NULL,
+    account_id     VARCHAR(64) NOT NULL,
+    run_id         VARCHAR(64) NOT NULL DEFAULT '',
+    stage          VARCHAR(32) NOT NULL DEFAULT '',
+    kind           VARCHAR(16) NOT NULL DEFAULT 'check',
+    status         VARCHAR(16) NOT NULL,
+    rule           VARCHAR(64) NOT NULL DEFAULT '',
+    reason         VARCHAR(512) NOT NULL DEFAULT '',
+    amount         DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    merchant       VARCHAR(80) NOT NULL DEFAULT '',
+    category       VARCHAR(80) NOT NULL DEFAULT '',
+    sku            VARCHAR(64) NOT NULL DEFAULT '',
+    qty            INTEGER NOT NULL DEFAULT 1,
+    escalation_id  VARCHAR(64) NOT NULL DEFAULT ''
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE INDEX policy_decisions_account_idx ON policy_decisions (account_id, ts);
+
+INSERT IGNORE INTO schema_migrations (id) VALUES ('006_policy_decisions');
+
+
+CREATE TABLE IF NOT EXISTS market_rules (
+    id INTEGER PRIMARY KEY,
+    version BIGINT NOT NULL,
+    rules_json JSON NOT NULL,
+    updated_by VARCHAR(64) NOT NULL,
+    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT IGNORE INTO schema_migrations (id) VALUES ('007_market_rules');

@@ -29,6 +29,19 @@ def test_chain_links_and_contract_hash(c):
     }
 
 
+def test_large_model_tool_evidence_is_preserved_and_hash_verified(c):
+    import json
+    reason = json.dumps({'products': [{'name': '商品' * 100, 'reason': 'catalog evidence' * 20} for _ in range(120)]}, ensure_ascii=False)
+    assert len(reason.encode('utf-8')) > 65535
+    response = c.post('/log_event', json={'event':'TOOL_RESULT','status':'RECORDED',
+                                         'reason':reason,'thought':'Checked current catalog'})
+    assert response.status_code == 200
+    entry = response.json()
+    stored = c.get('/audit_log').json()[0]
+    assert stored['reason'] == reason and stored['hash'] == entry['hash']
+    assert c.get('/audit_log/verify').json()['valid'] is True
+
+
 def test_contract_example_hash_is_reproducible():
     from audit_store import compute_hash
 

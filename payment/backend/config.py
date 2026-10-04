@@ -63,6 +63,7 @@ def _database_url() -> str:
 
 def settings() -> dict:
     return {
+        "persistance_url": env("PERSISTANCE_API_BASE_URL", "http://127.0.0.1:8003").rstrip("/"),
         "port": int(env("PAYMENT_API_PORT", "8004")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
         "token_secret": env("PAYMENT_TOKEN_SECRET", "dev-payment-secret-change-me"),

@@ -697,19 +697,45 @@ def test_week_of_food_guesses_several_ingredients() -> None:
         json={"intent": "buy food for 7 days with budget 700hkd"},
     ).json()
     assert body["status"] == "READY"
-    assert body["goal"]["model"] == "catalog"
-    assert [(line["sku"], line["qty"]) for line in body["lines"]] == [
-        ("SKU004", 1),
-        ("SKU007", 3),
-        ("SKU010", 4),
-    ]
-    assert body["quote"]["total_landed_cost"] == 161.6
-    assert body["quote"]["total_landed_cost"] <= 700
+    assert body["goal"]["model"] == "meal"
+    assert len({line["sku"] for line in body["lines"]}) >= 3
+    assert body["quote"]["total_landed_cost"] <= 500
     assert body["payment"] is None
-    assert body["settlement"]["total"] == 161.6
+    assert body["settlement"]["total"] == body["quote"]["total_landed_cost"]
     assert "7 days" in body["reply"]
     assert "700" in body["reply"]
-    assert "rice, water, and potato chips" in body["reply"]
+    assert "Guessed rice, water, and potato chips" not in body["reply"]
+    assert_chain(body["audit_log"])
+
+
+def test_sparse_food_shelf_explains_infeasible_minimum() -> None:
+    api = TestClient(create_app(ShoppingAgent(FileMall(), PolicyClient(offline=True), scripted)))
+    body = api.post(
+        "/agent/intent",
+        json={
+            "intent": (
+                "maximum is 500hkd for this order, and you must at least spent 400hkd. "
+                "buy me 5 days food with different products as possible, "
+                "i want more cash back dollar"
+            )
+        },
+    ).json()
+    total = body["settlement"]["total"]
+    skus = [line["sku"] for line in body["lines"]]
+    assert body["status"] == "READY"
+    assert body["payment"] is None
+    assert 0 < total < 400
+    assert body["quote"]["total_landed_cost"] <= 500
+    assert len(set(skus)) >= 3
+    assert body["meal"]["minimum_shortfall"] == round(400 - total, 2)
+    assert body["meal"]["meets_band"] is False
+    assert any("below your HK$400.00 minimum" in warning for warning in body["meal"]["warnings"])
+    assert all(line["qty"] == 1 for line in body["lines"] if line["category"] == "Food")
+    assert "Guessed rice, water, and potato chips" not in body["reply"]
+    assert body["reply"].count("Food for 5 days") == 1
+    assert "cashback" in body["reply"].casefold()
+    joined = "\n".join(line["product_reason"] for line in body["lines"])
+    assert "Category" in joined
     assert_chain(body["audit_log"])
 
 

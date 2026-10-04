@@ -120,6 +120,14 @@ class CatalogStore:
                 conn.commit()
         return {"upserted": len(rows), "skipped": skipped}
 
+    def update_price(self, sku: str, price: float) -> dict | None:
+        with connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE catalog_products SET price = %s, updated_at = CURRENT_TIMESTAMP(6) WHERE id = %s", (price, sku))
+                cur.execute(_SELECT + " WHERE id = %s", (sku,))
+                row = cur.fetchone()
+        return _public(row) if row else None
+
     def count(self) -> int:
         with connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -170,6 +178,24 @@ class CatalogStore:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
         return [_public(row) for row in rows]
+
+    def search_page(self, q: str = "", merchant: str = "", category: str = "", limit: int = 40, offset: int = 0) -> dict:
+        q, merchant, category = q.strip(), merchant.strip(), category.strip()
+        params = {"q": q, "like": _like(q) if q else "", "merchant": merchant, "category": category}
+        with connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT COUNT(*) AS n FROM catalog_products
+                    WHERE (%(q)s = '' OR name LIKE %(like)s ESCAPE '\\\\'
+                           OR merchant LIKE %(like)s ESCAPE '\\\\'
+                           OR category LIKE %(like)s ESCAPE '\\\\'
+                           OR id LIKE %(like)s ESCAPE '\\\\'
+                           OR sell_point LIKE %(like)s ESCAPE '\\\\')
+                      AND (%(merchant)s = '' OR merchant = %(merchant)s)
+                      AND (%(category)s = '' OR category = %(category)s)""", params)
+                total = int(cur.fetchone()["n"])
+        products = self.search(q, merchant, category, limit, offset)
+        return {"products": products, "total_count": total, "offset": offset,
+                "has_more": offset + len(products) < total, "source": "mysql"}
 
     def categories(self) -> list[dict]:
         with connect(self.database_url) as conn:

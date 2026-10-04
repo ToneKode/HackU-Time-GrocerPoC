@@ -7,6 +7,135 @@ This module scores the shelf the agent already loaded, one item at a time.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+import math
+
+_RULES = ContextVar("merchant_rules", default=None)
+
+
+def validate_rules(rules: dict) -> dict:
+    """Validate a live snapshot; an empty promotions list disables demo offers."""
+    if not isinstance(rules, dict) or type(rules.get("version")) is not int or rules["version"] < 0:
+        raise ValueError("Rules need a nonnegative integer version")
+    if not isinstance(rules.get("promotions"), list):
+        raise ValueError("Rules need a promotions array")
+    checked = deepcopy(rules)
+    seen = set()
+    for row in checked["promotions"]:
+        if not isinstance(row, dict):
+            raise ValueError("Promotion must be an object")
+        for key in ("id", "merchant"):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError(f"Promotion needs {key}")
+        if row["id"] in seen:
+            raise ValueError("Duplicate promotion id")
+        seen.add(row["id"])
+        if row.get("kind") not in {"percent", "bogo"} or type(row.get("enabled", True)) is not bool:
+            raise ValueError("Invalid promotion kind or enabled flag")
+        row.setdefault("enabled", True)
+        row.setdefault("threshold", 0)
+        if isinstance(row["threshold"], bool) or not isinstance(row["threshold"], (int, float)) or not math.isfinite(row["threshold"]) or row["threshold"] < 0:
+            raise ValueError("Promotion threshold must be finite and nonnegative")
+        if row["kind"] == "percent":
+            rate = row.get("rate")
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or not 0 <= rate <= 1:
+                raise ValueError("Percent rate must be a fraction between zero and one")
+            if row.get("sku"):
+                raise ValueError("Percent promotions apply to merchant subtotals")
+        else:
+            if not isinstance(row.get("sku"), str) or not row["sku"].strip():
+                raise ValueError("BOGO needs a SKU")
+            for key in ("buy_qty", "gift_qty"):
+                row.setdefault(key, 1)
+                if type(row[key]) is not int or row[key] < 1:
+                    raise ValueError(f"{key} must be a positive integer")
+    if "payment_promotions" in checked:
+        if not isinstance(checked["payment_promotions"], list):
+            raise ValueError("Rules need a payment_promotions array")
+        payment_keys = set()
+        for row in checked["payment_promotions"]:
+            if not isinstance(row, dict):
+                raise ValueError("Payment promotion must be an object")
+            route = row.get("route")
+            if not isinstance(route, str) or not route.strip():
+                raise ValueError("Payment promotion needs a route")
+            row["route"] = route.strip().casefold()
+            kind = row.get("kind")
+            if not isinstance(kind, str):
+                raise ValueError("Invalid payment promotion kind")
+            spelling = kind.strip().casefold().replace(" ", "").replace("_", "").replace("-", "")
+            kinds = {value.replace("_", ""): value for value in BENEFIT_KINDS}
+            if spelling not in kinds:
+                raise ValueError("Invalid payment promotion kind")
+            row["kind"] = kinds[spelling]
+            row.setdefault("merchant", "")
+            if not isinstance(row["merchant"], str):
+                raise ValueError("Payment promotion merchant must be a string")
+            row["merchant"] = row["merchant"].strip()
+            row.setdefault("enabled", True)
+            if type(row["enabled"]) is not bool:
+                raise ValueError("Invalid payment promotion enabled flag")
+            rate = row.get("rate")
+            limit = 1 if row["kind"] == "cash" else 1_000_000
+            if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                    or not 0 <= rate <= limit or not math.isfinite(rate)):
+                raise ValueError(f"Payment {row['kind']} rate must be finite and between zero and {limit}")
+            key = (row["route"], row["kind"], row["merchant"])
+            if key in payment_keys:
+                raise ValueError("Duplicate payment promotion route, kind and merchant")
+            payment_keys.add(key)
+    return checked
+
+
+def current_rules(rules: dict | None = None) -> dict | None:
+    return validate_rules(rules) if rules is not None else _RULES.get()
+
+
+@contextmanager
+def rules_context(rules: dict):
+    """Bind one validated snapshot for this request, restoring it on exit."""
+    token = _RULES.set(validate_rules(rules))
+    try:
+        yield _RULES.get()
+    finally:
+        _RULES.reset(token)
+
+
+def gift_lines(lines: list[dict], rules: dict | None = None) -> list[dict]:
+    """Derive same-SKU gifts exclusively from purchased quantities."""
+    snapshot = current_rules(rules)
+    if snapshot is None:
+        return []
+    paid = [line for line in lines if not line.get("is_gift")]
+    totals = {}
+    grouped = {}
+    for line in paid:
+        merchant = str(line.get("merchant") or "Shop")
+        totals[merchant] = totals.get(merchant, 0) + float(line.get("line_total") or 0)
+        key = (merchant, str(line.get("sku") or line.get("id") or ""))
+        grouped.setdefault(key, []).append(line)
+    gifts = []
+    # Multiple offers for one SKU do not stack; the largest gift wins.
+    for (merchant, sku), group in grouped.items():
+        qty = sum(int(line["qty"]) for line in group)
+        eligible = [row for row in snapshot["promotions"] if row["enabled"] and row["kind"] == "bogo"
+                    and row["merchant"] == merchant and row["sku"] == sku
+                    and _money(totals[merchant]) >= row["threshold"]]
+        if not eligible:
+            continue
+        promo = max(eligible, key=lambda row: (qty // row["buy_qty"] * row["gift_qty"], row["id"]))
+        count = qty // promo["buy_qty"] * promo["gift_qty"]
+        if count:
+            base = group[0]
+            gifts.append({**base, "sku": sku, "qty": count, "unit_price": 0.0, "price": 0.0,
+                          "line_total": 0.0, "is_gift": True, "gift_for_sku": sku,
+                          "purchased_qty": qty, "promotion_id": promo["id"], "rules_version": snapshot["version"],
+                          "product_reason": f"Free gift from promotion {promo["id"]}",
+                          "merchant_reason": "Included at no charge with the purchased product."})
+    return gifts
+
 BENEFIT_KINDS = ("cash", "asiamiles", "membership_points", "loyalty_points")
 DEFAULT_RANK = list(BENEFIT_KINDS)
 
@@ -57,6 +186,10 @@ def connected_methods(methods: list[dict] | None) -> list[dict]:
 
 def _instrument_for(method: dict) -> dict:
     text = f"{method.get('label') or ''} {method.get('route') or ''}".casefold()
+    route = str(method.get("route") or "").casefold()
+    if route and route not in {instrument["route"] for instrument in INSTRUMENTS}:
+        return {"route": route, "label": method.get("label") or "Card",
+                "bank": method.get("bank") or method.get("label") or "Card", "keys": ()}
     for instrument in INSTRUMENTS:
         if method.get("route") == instrument["route"] or any(key in text for key in instrument["keys"]):
             return instrument
@@ -72,22 +205,59 @@ def _money(value: float) -> float:
     return round(float(value) + 1e-9, 2)
 
 
-def quote_tender(merchant: str, subtotal: float, method: dict) -> dict:
+def quote_tender(merchant: str, subtotal: float, method: dict, *, rules: dict | None = None) -> dict:
     """One merchant, one connected tender. Discount stays off the policy amount."""
     instrument = _instrument_for(method)
     subtotal = _money(subtotal)
+    if not method.get("connected", True) or (method.get("merchants") and merchant not in method["merchants"]):
+        return {"route": "", "label": "No connected card", "bank": "", "last4": "",
+                "discount": 0.0, "payable": subtotal, "benefits": [],
+                "because": "This payment method is unavailable for this merchant.",
+                "rates": {kind: 0.0 for kind in BENEFIT_KINDS}}
     discount = 0.0
     notes: list[str] = []
-    if merchant == "Watsons" and subtotal >= 300:
+    snapshot = current_rules(rules)
+    if snapshot is not None:
+        offers = [row for row in snapshot["promotions"] if row["enabled"] and row["kind"] == "percent"
+                  and row["merchant"] == merchant and subtotal >= row["threshold"]]
+        if offers:
+            offer = max(offers, key=lambda row: (row["rate"], row["id"]))
+            discount = _money(subtotal * offer["rate"])
+            notes.append(f"Promotion {offer["id"]}: {offer["rate"] * 100:g}% off at HK${offer["threshold"]:g}")
+    elif merchant == "Watsons" and subtotal >= 300:
         discount = _money(subtotal * 0.15)
-        notes.append("Watsons order over HK$300 gets 15% off")
+        notes.append("Demo Watsons offer: goods of at least HK$300 get 15% off")
     elif merchant == "PARKnSHOP" and subtotal >= 300:
         discount = _money(subtotal * 0.10)
-        notes.append("PARKnSHOP order over HK$300 gets 10% off")
+        notes.append("Demo PARKnSHOP offer: goods of at least HK$300 get 10% off")
     payable = _money(subtotal - discount)
     benefits: list[dict] = []
     route = instrument["route"]
-    if route == "mastercard":
+    configured_rates = None
+    if snapshot is not None and "payment_promotions" in snapshot:
+        selected = {}
+        for row in snapshot["payment_promotions"]:
+            if row["route"] != route or row["merchant"] not in ("", merchant):
+                continue
+            previous = selected.get(row["kind"])
+            if previous is None or row["merchant"]:
+                selected[row["kind"]] = row
+        configured_rates = {kind: 0.0 for kind in BENEFIT_KINDS}
+        labels = {"cash": "cashback", "asiamiles": "Asia Miles",
+                  "membership_points": "membership points", "loyalty_points": "loyalty points"}
+        for kind in BENEFIT_KINDS:
+            row = selected.get(kind)
+            if row is None or not row["enabled"]:
+                continue
+            rate = float(row["rate"])
+            configured_rates[kind] = rate
+            amount = _money(payable * rate)
+            rate_text = f"{rate * 100:g}% cashback" if kind == "cash" else f"{rate:g} {labels[kind]} per HK$1"
+            detail = f"{rate_text} on {instrument['label']}: {amount:.2f} earned on HK${payable:.2f} discounted goods"
+            if amount:
+                benefits.append({"kind": kind, "amount": amount, "detail": detail})
+            notes.append(detail)
+    elif route == "mastercard":
         multiplier = 2 if merchant == "Watsons" else 1
         points = _money(payable * float(instrument.get("membership_points_per_hkd") or 1) * multiplier)
         benefits.append(
@@ -131,7 +301,10 @@ def quote_tender(merchant: str, subtotal: float, method: dict) -> dict:
         notes.append(f"ICBC Visa earns Asia Miles at {merchant}")
     because = " ".join(notes) if notes else f"{instrument['label']} is a connected way to pay {merchant}."
     rates = {kind: 0.0 for kind in BENEFIT_KINDS}
-    if route == "mastercard":
+    if configured_rates is not None:
+        rates.update({kind: rate * payable / subtotal if subtotal else 0.0
+                      for kind, rate in configured_rates.items()})
+    elif route == "mastercard":
         rates["cash"] = float(instrument.get("cashback") or 0)
         rates["membership_points"] = float(instrument.get("membership_points_per_hkd") or 1) * (
             2 if merchant == "Watsons" else 1
@@ -176,10 +349,13 @@ def _tender_sort_key(tender: dict, rank: list[str] | None) -> tuple:
     return tuple(-rates[kind] for kind in _rank_order(rank)) + (float(tender.get("payable") or 0),)
 
 
-def choose_tender(merchant: str, subtotal: float, methods: list[dict] | None, rank: list[str] | None) -> dict:
+def choose_tender(merchant: str, subtotal: float, methods: list[dict] | None, rank: list[str] | None, *, rules: dict | None = None) -> dict:
     """The shopper's first-ranked benefit picks the card. Later ranks break ties."""
     order = _rank_order(rank)
-    pool = connected_methods(methods)
+    pool = [
+        method for method in connected_methods(methods)
+        if not method.get("merchants") or merchant in method["merchants"]
+    ]
     if not pool:
         return {
             "route": "",
@@ -195,7 +371,7 @@ def choose_tender(merchant: str, subtotal: float, methods: list[dict] | None, ra
     best = None
     best_key = None
     for method in pool:
-        quote = quote_tender(merchant, subtotal, method)
+        quote = quote_tender(merchant, subtotal, method, rules=rules)
         key = _tender_sort_key(quote, order)
         if best is None or key < best_key:
             best = quote
@@ -343,8 +519,12 @@ def settlement_for(
     quote: dict,
     methods: list[dict] | None = None,
     rank: list[str] | None = None,
+    *, rules: dict | None = None,
 ) -> dict:
     """Overall total, with one tender per merchant. Shipping is added to the largest tender."""
+    snapshot = current_rules(rules)
+    lines = [line for line in lines if not line.get("is_gift")]
+    lines = lines + gift_lines(lines, snapshot)
     groups: dict[str, list[dict]] = {}
     for line in lines:
         groups.setdefault(line.get("merchant") or "Shop", []).append(line)
@@ -354,7 +534,7 @@ def settlement_for(
     combined_benefits: dict[str, dict] = {}
     for merchant, group in groups.items():
         subtotal = _money(sum(float(line.get("line_total") or 0) for line in group))
-        tender = choose_tender(merchant, subtotal, methods, rank)
+        tender = choose_tender(merchant, subtotal, methods, rank, rules=snapshot)
         discount = _money(discount + tender["discount"])
         goods = _money(goods + tender["payable"])
         for benefit in tender["benefits"]:
@@ -380,6 +560,7 @@ def settlement_for(
                 "because": tender["because"],
                 "lines": [
                     {
+                        **{key: line[key] for key in ("is_gift", "gift_for_sku", "purchased_qty", "promotion_id", "rules_version") if key in line},
                         "sku": line.get("sku"),
                         "name": line.get("name"),
                         "qty": int(line.get("qty") or 1),
@@ -400,6 +581,7 @@ def settlement_for(
     total = _money(goods + shipping + tax)
     subtotal = _money(sum(float(line.get("line_total") or 0) for line in lines))
     return {
+        "rules_version": snapshot["version"] if snapshot is not None else None,
         "currency": (quote or {}).get("currency") or "HKD",
         "subtotal": subtotal,
         "discount": discount,

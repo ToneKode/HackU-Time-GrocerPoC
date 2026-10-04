@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Any
 
-STATUSES = ("DRAFT", "AUTHORIZED", "CAPTURED", "FAILED", "REFUNDED")
+STATUSES = ("DRAFT", "PENDING", "AUTHORIZED", "CAPTURED", "FAILED", "REFUNDED")
 
 
 def new_id() -> str:
@@ -35,7 +35,7 @@ class PaymentStore:
 
     def put(self, record: dict) -> dict:
         with self._lock:
-            self._mem[record["payment_id"]] = record
+            self._mem[record["payment_id"]] = record.copy()
             if self._r is not None:
                 self._r.set(f"pay:rec:{record['payment_id']}", json.dumps(record), ex=7 * 24 * 3600)
         return record
@@ -45,7 +45,8 @@ class PaymentStore:
             raw = self._r.get(f"pay:rec:{payment_id}")
             if raw:
                 return json.loads(raw)
-        return self._mem.get(payment_id)
+        record = self._mem.get(payment_id)
+        return record.copy() if record else None
 
     def mark_jti_used(self, jti: str) -> bool:
         """Return True if this is the first use (ok to charge)."""
@@ -56,6 +57,24 @@ class PaymentStore:
                 return False
             self._jti_used.add(jti)
             return True
+
+    def begin_attempt(self, record: dict) -> dict:
+        """Persist retry context before the first rail request."""
+        with self._lock:
+            current = self.get(record["payment_id"])
+            if current and current["status"] in {"PENDING", "CAPTURED"}:
+                return current
+            jti = record["token_jti"]
+            if self._r is not None:
+                if not self._r.set(f"pay:jti:{jti}", "1", nx=True, ex=7 * 24 * 3600):
+                    raise ValueError("Token already used")
+            elif jti in self._jti_used:
+                raise ValueError("Token already used")
+            self._jti_used.add(jti)
+            self._mem[record["payment_id"]] = record.copy()
+            if self._r is not None:
+                self._r.set(f"pay:rec:{record['payment_id']}", json.dumps(record), ex=7 * 24 * 3600)
+            return record
 
     def reset(self) -> None:
         with self._lock:

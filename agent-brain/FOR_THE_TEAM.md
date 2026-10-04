@@ -114,3 +114,33 @@ Person 2's engine is already on the path. Every line is checked, then the landed
 5. `one_item_every_category` — one cheap item from each shelf category, including Food, Health, and Electronics. Landed HK$326.60 and paid.
 6. `same_merchant` — the same ten-category list, plus one shop. HKTVmall covers every category, so the basket locks there. Landed HK$568.70, which is over the HK$500 cap, so the agent asks before anyone pays.
 7. A fuzzy meal plan such as "food for 7 days with budget 700hkd" is a guess: cheap rice, water, and potato chips in week-sized quantities, landed HK$161.60. A sentence that names nothing, such as "buy me something", asks a follow-up and does not pay.
+
+## Meal plans: optimiser first, model second
+
+A food sentence with days, people or a budget ("buy me foods for 5 days for a family of 3,
+maximum 500 HKD, spend at least 80%") goes to `backend/meal_plan.py`. It is plain code:
+
+1. `parse_request` reads the cap, the minimum (an amount or a % of the cap), days, family
+   size and the food groups asked for.
+2. `plan_meal` builds one basket per whitelisted shop plus a mixed basket from the real
+   catalog (persistance :8003, or `hk_products_full.json` when :8003 is down). Each basket
+   covers servings per group for family x days, then fills to the minimum. Each basket is
+   priced with `benefits.settlement_for` on the profile's CONNECTED methods and
+   `benefit_rank`, and the best one wins.
+3. Every line carries `product_reason` (why this item, servings vs family x days, coverage,
+   price, share of the cap, tender and line benefits). `plan.meal` carries the parsed
+   request, the band, coverage, the per-merchant tender comparison and the alternatives.
+4. If `OPENROUTER_API_KEY` is set, `OpenRouterPlanner.enrich_meal_plan` asks the model for
+   meal ideas per SKU and a check of the parse. `openrouter.validate_enrichment` drops any
+   note for a SKU not in the basket and any text with a number that is not in the input.
+   The model never changes items, quantities or prices. `plan.meal.llm` says if it ran.
+5. The basket then goes through the usual policy check (`fit_basket`), then review.
+
+`react` steps keep their source: `optimizer` for the planner, `llm` only when a model wrote
+the step.
+
+New endpoint: `POST /agent/basket/alternatives` `{intent, sku, exclude_skus}` returns
+`{sku, alternatives: [{sku, name, merchant, price, per_serving, reason}]}` from the catalog,
+same food group. `POST /agent/basket/confirm` re-runs policy and, for meal plans,
+recomputes each line's reasons; a basket over the shopper's own maximum comes back as
+`NEEDS_INPUT` with the lines, so the sheet can stay open for edits.

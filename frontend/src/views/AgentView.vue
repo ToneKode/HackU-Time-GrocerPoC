@@ -1,14 +1,14 @@
 <script setup>
 // Chat with the shopping agent. Each request is a user message; the agent replies with a
 // message that carries the ActionPlan (order, approval card, steps). Settings live in a sidebar.
-import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import contract from '../../contract.json'
 import * as api from '../lib/api.js'
-import { money } from '../lib/format.js'
+import { money, giftLines, paidLines } from '../lib/format.js'
 import { productName, storeName, policyReason } from '../i18n/index.js'
-import { session } from '../stores/auth.js'
+import { session, syncProfile, accountRevision } from '../stores/auth.js'
 import OrderCard from '../components/OrderCard.vue'
 import ApprovalCard from '../components/ApprovalCard.vue'
 import PaymentDraftCard from '../components/PaymentDraftCard.vue'
@@ -34,8 +34,35 @@ const messages = ref([])
 const escalations = reactive({}) // escalation_id -> live Escalation (polled)
 const openSteps = reactive({}) // message id -> steps expanded
 let nextId = 1
+function isCurrent(request) {
+  return session.user?.id === request?.account_id && accountRevision === request?.accountRevision
+}
+
 const busy = ref(false)
 const deciding = ref(false)
+const recoveringOrders = ref(false)
+const recoveryNotice = ref('')
+
+async function recoverAccountOrders() {
+  const request = { account_id: session.user?.id, accountRevision }
+  if (!request.account_id || recoveringOrders.value) return
+  recoveringOrders.value = true
+  recoveryNotice.value = ''
+  try {
+    const result = await api.recoverOrders(request.account_id)
+    if (!isCurrent(request)) return
+    recoveryNotice.value = t('agentCards.ordersRecoveryResult', { saved: result.recovered?.length || 0, pending: result.pending?.length || 0 })
+    const profile = await api.getProfile(request.account_id)
+    if (!isCurrent(request)) return
+    syncProfile(profile, request.account_id)
+    monthlySpent.value = Number(profile.monthly_spent) || 0
+    spentLocked.value = true
+  } catch (err) {
+    if (isCurrent(request)) recoveryNotice.value = err.message
+  } finally {
+    if (isCurrent(request)) recoveringOrders.value = false
+  }
+}
 
 const scroller = ref(null)
 async function scrollToBottom() {
@@ -47,7 +74,7 @@ function push(message) {
   const m = { id: nextId++, ...message }
   messages.value.push(m)
   scrollToBottom()
-  return m
+  return messages.value[messages.value.length - 1]
 }
 function replace(target, message) {
   const i = messages.value.indexOf(target)
@@ -55,7 +82,7 @@ function replace(target, message) {
   const next = { ...target, ...message }
   messages.value.splice(i, 1, next)
   scrollToBottom()
-  return next
+  return messages.value[i]
 }
 
 // ---- Composer ----
@@ -77,17 +104,18 @@ function onKeydown(event) {
   }
 }
 
-onMounted(async () => {
-  if (session.user?.id) {
+async function loadAccount() {
+  const id = session.user?.id
+  const revision = accountRevision
+  if (id) {
     try {
-      const profile = await api.getProfile(session.user.id)
+      const profile = await api.getProfile(id)
+      if (session.user?.id !== id || revision !== accountRevision) return
       monthlySpent.value = Number(profile.monthly_spent) || 0
       spentLocked.value = true
-      session.user.monthly_cap = profile.monthly_cap
-      session.user.per_order_cap = profile.per_order_cap
-      session.user.bulk_ceiling = profile.bulk_ceiling
-      session.user.membership = profile.membership
-      const history = await api.getChat(session.user.id)
+      syncProfile(profile, id)
+      const history = await api.getChat(id)
+      if (session.user?.id !== id || revision !== accountRevision) return
       for (const row of history) {
         push({
           role: row.role === 'assistant' ? 'agent' : 'user',
@@ -96,9 +124,16 @@ onMounted(async () => {
         })
       }
     } catch {
+      if (revision !== accountRevision) return
       spentLocked.value = false
     }
   }
+}
+
+onMounted(async () => {
+  const revision = accountRevision
+  await loadAccount()
+  if (revision !== accountRevision) return
   const intent = String(route.query.intent || '').trim()
   if (!intent) return
   router.replace({ name: 'agent' })
@@ -114,6 +149,7 @@ function send(text = draft.value) {
     intent,
     monthly_spent: Number(monthlySpent.value) || 0,
     account_id: session.user?.id,
+    accountRevision,
   }
   push({ role: 'user', kind: 'text', text: intent })
   runAgent(request)
@@ -157,33 +193,38 @@ onBeforeUnmount(() => {
 async function runAgent(request, escalationId) {
   stopPolling()
   busy.value = true
-  const thinking = push({ role: 'agent', kind: 'thinking' })
+  const thinking = push({ role: 'agent', kind: 'thinking', request })
   try {
     const plan = await api.sendIntent({ ...request, escalation_id: escalationId })
+    if (!isCurrent(request)) return
     if (plan.escalation) escalations[plan.escalation.escalation_id] = plan.escalation
-    const shown = replace(thinking, { kind: 'plan', plan, request })
+    const uncertain = !plan.payment?.success && (plan.payment?.retryable || ['PENDING', 'UNKNOWN', 'PROCESSING'].includes(plan.payment?.status))
+    const shown = replace(thinking, { kind: 'plan', plan, request, paymentUncertain: Boolean(uncertain), paymentError: uncertain ? t('agentCards.paymentUncertain') : '' })
+    if (plan.payment?.success) await recoverSettlement(shown, request.account_id)
     if (plan.status === 'ESCALATED' && plan.escalation?.status === 'PENDING') startPolling(plan.escalation.escalation_id)
     if (isBasketReview(plan)) openBasket(shown)
   } catch (e) {
+    if (!isCurrent(request)) return
     replace(thinking, { kind: 'error', text: t('agentChat.error', { message: e.message }) })
   } finally {
-    busy.value = false
+    if (isCurrent(request)) busy.value = false
   }
 }
 
 // Approve -> ask the agent again with the same request + escalation_id.
 // Refuse -> the agent confirms the cancellation; it is not called again.
 async function onDecide(message, decision) {
+  if (!isCurrent(message.request)) return
   const id = message.plan.escalation.escalation_id
   stopPolling()
   deciding.value = true
   try {
     const esc = await api.decide(id, decision)
+    if (!isCurrent(message.request)) return
     escalations[id] = esc
     if (esc.status === 'APPROVED') {
       push({ role: 'agent', kind: 'text', text: t('agentChat.approvedNote') })
-      if (message.plan.settlement) openPay(message)
-      else await runAgent(message.request, id)
+      await runAgent(message.request, id)
     } else if (esc.status === 'REFUSED') {
       push({ role: 'agent', kind: 'text', text: t('agentChat.refused') })
     } else if (esc.status === 'EXPIRED') {
@@ -192,41 +233,74 @@ async function onDecide(message, decision) {
       startPolling(id)
     }
   } catch (e) {
+    if (!isCurrent(message.request)) return
     push({ role: 'agent', kind: 'error', text: t('agentChat.error', { message: e.message }) })
   } finally {
-    deciding.value = false
+    if (isCurrent(message.request)) deciding.value = false
+  }
+}
+
+async function capturePayment(message, recover = false) {
+  const plan = message.plan
+  const accountId = message.request?.account_id
+  if (!isCurrent(message.request) || deciding.value || plan.payment?.success) return
+  if (message.paymentUncertain && !recover) return
+  deciding.value = true
+  message.paymentError = ''
+  try {
+    const draft = plan.payment_draft
+    const payment = recover
+      ? await api.recoverPayment({ payment_id: plan.payment?.payment_id || draft?.payment_id, account_id: accountId })
+      : draft?.payment_id
+      ? await api.authorizePayment({
+          payment_id: draft.payment_id,
+          step_up_confirmed: Boolean(draft.step_up_required),
+          account_id: accountId,
+        })
+      : await api.approveBasket({
+          amount: plan.settlement?.total,
+          payment_route: plan.settlement?.merchants?.[0]?.payment?.route || 'mastercard',
+          merchant: plan.settlement?.merchants?.[0]?.merchant || '',
+          account_id: accountId,
+          step_up_confirmed: true,
+        })
+    plan.payment = payment
+    message.paymentUncertain = !payment.success && (payment.retryable || ['PENDING', 'UNKNOWN', 'PROCESSING'].includes(payment.status))
+    if (!payment.success) {
+      message.paymentError = message.paymentUncertain ? t('agentCards.paymentUncertain') : t('agentChat.failed', { error: payment.error || '' })
+      return
+    }
+    plan.status = 'COMPLETED'
+    if (draft) draft.status = 'CAPTURED'
+    if (isCurrent(message.request)) closePay()
+    await recoverSettlement(message, accountId)
+  } catch (err) {
+    message.paymentUncertain = !err.status || err.status >= 500
+    message.paymentError = message.paymentUncertain ? t('agentCards.paymentUncertain') : t('agentChat.error', { message: err.message })
+  } finally {
+    if (isCurrent(message.request)) deciding.value = false
   }
 }
 
 async function onAuthorize(message) {
-  const draft = message.plan.payment_draft
-  if (!draft || deciding.value) return
-  deciding.value = true
+  await capturePayment(message)
+}
+
+async function recoverSettlement(message, accountId = message.request?.account_id) {
+  if (!accountId || message.savingOrder || message.orderSaved || !message.plan.payment?.success) return
+  message.savingOrder = true
+  message.settlementErrorBeforeRetry = Boolean(message.settlementError)
+  message.settlementError = ''
   try {
-    const payment = await api.authorizePayment({
-      payment_id: draft.payment_id,
-      step_up_confirmed: Boolean(draft.step_up_required),
-      account_id: session.user?.id,
-    })
-    message.plan.payment = payment
-    if (payment.success) {
-      message.plan.status = 'COMPLETED'
-      draft.status = 'CAPTURED'
-      push({
-        role: 'agent',
-        kind: 'text',
-        text: t('agentChat.paid', {
-          amount: money(payment.charged),
-          order: payment.order_id || draft.payment_id,
-        }),
-      })
-    } else {
-      push({ role: 'agent', kind: 'error', text: t('agentChat.failed', { error: payment.error || '' }) })
+    if (message.plan.payment.settlement_pending || message.settlementErrorBeforeRetry) {
+      await api.recoverOrders(accountId)
     }
-  } catch (e) {
-    push({ role: 'agent', kind: 'error', text: t('agentChat.error', { message: e.message }) })
+    await rememberOrder(message.plan, message.plan.payment, accountId, message.request)
+    message.orderSaved = true
+  } catch (err) {
+    message.settlementError = err.message
   } finally {
-    deciding.value = false
+    message.savingOrder = false
   }
 }
 
@@ -247,7 +321,7 @@ function summary(plan) {
     case 'COMPLETED':
       return t('agentChat.done', { product, store, amount })
     case 'ESCALATED':
-      return t('agentChat.needsApproval', { product, store, amount })
+      return t('agentChat.needsApproval', { product, store, amount, perOrder: money(plan.policy?.per_transaction_cap ?? session.user?.per_order_cap ?? 500) })
     case 'HALTED':
       return t('agentChat.halted', { reason: policyReason(plan.policy?.reason ?? '') })
     case 'FAILED':
@@ -263,13 +337,13 @@ function summary(plan) {
 
 function visibleThoughts(plan) {
   const fromModel = (plan.react || [])
-    .filter((step) => step.source === 'llm' && step.thought)
+    .filter((step) => (step.source === 'llm' || step.source === 'optimizer') && step.thought)
     .map((step) => step.thought)
   const fromBasket = (plan.audit_log || [])
     .filter((entry) => entry.event === 'BASKET_PICKED' || entry.event === 'SEARCH')
     .map((entry) => entry.thought)
     .filter(Boolean)
-  return [...fromModel, ...fromBasket]
+  return [...new Set([...fromModel, ...fromBasket])]
 }
 
 async function clearChat() {
@@ -320,11 +394,11 @@ const latestPlan = computed(() => [...messages.value].reverse().find((m) => m.ki
 const budget = computed(() => {
   const policy = latestPlan.value?.policy
   const spent = policy?.monthly_spent ?? (Number(monthlySpent.value) || 0)
-  const cap = policy?.monthly_cap ?? monthlyCap.value
+  const cap = monthlyCap.value
   return {
     cap,
     spent,
-    remaining: policy?.monthly_remaining ?? cap - spent,
+    remaining: cap - spent,
     amount: policy?.amount ?? 0,
     status: policy?.status ?? null,
   }
@@ -337,6 +411,7 @@ const payOpen = ref(false)
 const sheetMessage = ref(null)
 const sheetLines = ref([])
 const removedSkus = ref([])
+const basketNotice = ref('')
 const paySeconds = ref(600)
 let payTimer = null
 
@@ -351,7 +426,7 @@ function isBasketReview(plan) {
 }
 function canPay(plan) {
   if (!plan?.settlement || plan.payment?.success || isBasketReview(plan)) return false
-  if (plan.status === 'READY') return true
+  if (plan.status === 'READY' || (plan.status === 'FAILED' && plan.payment_draft)) return true
   const id = plan.escalation?.escalation_id
   return Boolean(id && escalations[id]?.status === 'APPROVED')
 }
@@ -362,10 +437,12 @@ function stopPayTimer() {
 }
 
 function openBasket(message) {
+  if (!isCurrent(message.request)) return
   const lines = message.plan?.lines?.length ? message.plan.lines : []
   sheetMessage.value = message
   removedSkus.value = []
-  sheetLines.value = lines.map((line) => ({ ...line }))
+  basketNotice.value = ''
+  sheetLines.value = paidLines(lines).map((line) => ({ ...line }))
   payOpen.value = false
   basketOpen.value = true
 }
@@ -376,6 +453,7 @@ function closePay() {
 }
 
 function openPay(message) {
+  if (!isCurrent(message.request) || message.paymentUncertain) return
   sheetMessage.value = message
   basketOpen.value = false
   payOpen.value = true
@@ -396,6 +474,28 @@ function changeQty(sku, qty) {
   line.line_total = Math.round(unit * next * 100) / 100
 }
 
+// Swap one line for a catalog alternative in the same food group. Price comes from the
+// catalog row; the agent reprices and re-runs the policy check on confirm.
+function swapLine(sku, option) {
+  const index = sheetLines.value.findIndex((line) => line.sku === sku)
+  if (index < 0 || sheetLines.value.some((line) => line.sku === option.sku)) return
+  const old = sheetLines.value[index]
+  const price = Number(option.price) || 0
+  sheetLines.value.splice(index, 1, {
+    ...old,
+    sku: option.sku,
+    name: option.name,
+    need: option.name,
+    merchant: option.merchant,
+    category: option.category,
+    image_url: option.image_url || '',
+    unit_price: price,
+    line_total: Math.round(price * old.qty * 100) / 100,
+    merchant_reason: '',
+    product_reason: t('agentCards.swappedReason', { name: old.name, reason: option.reason }),
+  })
+}
+
 function removeLine(sku) {
   if (!removedSkus.value.includes(sku)) removedSkus.value.push(sku)
   sheetLines.value = sheetLines.value.filter((line) => line.sku !== sku)
@@ -404,52 +504,69 @@ function removeLine(sku) {
 async function confirmBasket() {
   const message = sheetMessage.value
   if (!message || deciding.value) return
+  const accountId = message.request?.account_id
+  if (!isCurrent(message.request)) return
   deciding.value = true
   try {
     const next = await api.confirmBasket({
       intent: message.plan.intent,
-      account_id: session.user?.id,
+      account_id: accountId,
       monthly_spent: Number(monthlySpent.value) || 0,
       lines: sheetLines.value.map((line) => ({ sku: line.sku, qty: line.qty })),
       removed_skus: removedSkus.value,
     })
+    if (!isCurrent(message.request)) return
     message.plan = {
       ...next,
+      // Keep what the first run read from the sentence; the confirm adds band checks.
+      meal: message.plan.meal || next.meal ? { ...(message.plan.meal || {}), ...(next.meal || {}) } : null,
+      payment_reason: next.payment_reason || message.plan.payment_reason,
       audit_log: [...(message.plan.audit_log || []), ...(next.audit_log || [])],
       react: [...(message.plan.react || []), ...(next.react || [])],
     }
-    basketOpen.value = false
     if (next.escalation) escalations[next.escalation.escalation_id] = next.escalation
-    if (next.status === 'NEEDS_INPUT') return
+    if (next.status === 'NEEDS_INPUT') {
+      // The rules (or the shopper's own maximum) sent the basket back. Keep the sheet
+      // open with the reasons so the shopper can edit and check again.
+      basketNotice.value = next.question || next.reply || next.policy?.reason || t('agentChat.needsInput')
+      if (next.lines?.length) sheetLines.value = paidLines(next.lines).map((line) => ({ ...line }))
+      basketOpen.value = true
+      return
+    }
+    basketNotice.value = ''
+    basketOpen.value = false
     if (next.status === 'ESCALATED' && next.escalation?.status === 'PENDING') {
       startPolling(next.escalation.escalation_id)
       return
     }
     if (next.status === 'READY') openPay(message)
   } catch (e) {
+    if (!isCurrent(message.request)) return
     push({ role: 'agent', kind: 'error', text: t('agentChat.error', { message: e.message }) })
   } finally {
-    deciding.value = false
+    if (isCurrent(message.request)) deciding.value = false
   }
 }
 
-async function rememberOrder(plan, payment) {
-  if (!session.user?.id || !payment?.success) return null
+async function rememberOrder(plan, payment, accountId, request) {
+  if (!accountId || !payment?.success) return null
   const lines = plan.lines?.length
     ? plan.lines
     : (plan.settlement?.merchants || []).flatMap((group) => group.lines || [])
-  const saved = await api.settleOrder(session.user.id, {
+  const saved = await api.settleOrder(accountId, {
     amount: payment.charged,
     currency: payment.currency || 'HKD',
-    merchant: (plan.settlement?.merchants || []).map((group) => group.merchant).filter(Boolean).join(', '),
-    payment_route: payment.payment_route || plan.settlement?.merchants?.[0]?.payment?.route || '',
-    payment_id: payment.payment_id || payment.order_id,
+    merchant: (plan.settlement?.merchants || []).map((group) => group.merchant).filter(Boolean).join(', ') || plan.payment_draft?.merchant || plan.product?.merchant || '',
+    payment_route: payment.payment_route || plan.settlement?.merchants?.[0]?.payment?.route || plan.payment_draft?.rail || '',
+    payment_id: payment.payment_id || plan.payment_draft?.payment_id || payment.order_id,
     intent: plan.intent,
     lines,
     settlement: plan.settlement,
     benefits: plan.settlement?.benefits || [],
+    gifts: giftLines(plan),
   })
-  if (saved.profile) {
+  if (saved.profile && isCurrent(request)) {
+    syncProfile(saved.profile, accountId)
     monthlySpent.value = Number(saved.profile.monthly_spent) || 0
     spentLocked.value = true
   }
@@ -458,52 +575,27 @@ async function rememberOrder(plan, payment) {
 
 async function approvePay() {
   const message = sheetMessage.value
-  const plan = message?.plan
-  if (!plan || deciding.value || paySeconds.value <= 0) return
-  deciding.value = true
-  try {
-    const draft = plan.payment_draft
-    const payment = draft?.payment_id
-      ? await api.authorizePayment({
-          payment_id: draft.payment_id,
-          step_up_confirmed: Boolean(draft.step_up_required),
-          account_id: session.user?.id,
-        })
-      : await api.approveBasket({
-          amount: plan.settlement?.total,
-          payment_route: plan.settlement?.merchants?.[0]?.payment?.route || 'mastercard',
-          merchant: plan.settlement?.merchants?.[0]?.merchant || '',
-          account_id: session.user?.id,
-          step_up_confirmed: true,
-        })
-    plan.payment = payment
-    if (payment.success) {
-      plan.status = 'COMPLETED'
-      if (draft) draft.status = 'CAPTURED'
-      payOpen.value = false
-      stopPayTimer()
-      let saved = null
-      try {
-        saved = await rememberOrder(plan, payment)
-      } catch (err) {
-        push({ role: 'agent', kind: 'error', text: t('agentChat.error', { message: err.message }) })
-      }
-      push({
-        role: 'agent',
-        kind: 'text',
-        text: t('agentChat.paid', {
-          amount: money(payment.charged),
-          order: saved?.order_id || payment.order_id || draft?.payment_id || '',
-        }),
-      })
-    } else {
-      push({ role: 'agent', kind: 'error', text: t('agentChat.failed', { error: payment.error || '' }) })
-    }
-  } catch (e) {
-    push({ role: 'agent', kind: 'error', text: t('agentChat.error', { message: e.message }) })
-  } finally {
-    deciding.value = false
-  }
+  if (!message || paySeconds.value <= 0) return
+  await capturePayment(message)
+}
+
+watch(() => session.user?.id, async () => {
+  stopPolling()
+  closePay()
+  basketOpen.value = false
+  sheetMessage.value = null
+  messages.value = []
+  busy.value = false
+  deciding.value = false
+  recoveringOrders.value = false
+  recoveryNotice.value = ''
+  monthlySpent.value = 0
+  spentLocked.value = false
+  await loadAccount()
+}, { flush: 'sync' })
+
+function thoughtParts(text) {
+  return String(text || '').split(/\n+/).map((part) => part.trim()).filter(Boolean)
 }
 </script>
 
@@ -527,7 +619,7 @@ async function approvePay() {
         <div class="msg agent">
           <span class="chat-avatar agent"><Icon :icon="AiMagicIcon" :size="18" /></span>
           <div class="msg-body">
-            <p class="bubble">{{ $t('agentChat.welcome') }}</p>
+            <p class="bubble">{{ $t('agentChat.welcome', { perOrder: money(session.user?.per_order_cap ?? 500) }) }}</p>
           </div>
         </div>
 
@@ -546,14 +638,20 @@ async function approvePay() {
 
             <!-- agent result -->
             <template v-else-if="m.kind === 'plan'">
-              <p v-for="(thought, i) in visibleThoughts(m.plan)" :key="`${m.id}-thought-${i}`" class="bubble thought">{{ thought }}</p>
+              <div v-for="(thought, i) in visibleThoughts(m.plan)" :key="`${m.id}-thought-${i}`" class="bubble thought"><p v-for="(part, j) in thoughtParts(thought)" :key="j">{{ part }}</p></div>
+              <section v-if="m.plan.lines?.length" class="card item-explanations">
+                <h2>{{ $t('agentCards.itemReasons') }}</h2>
+                <article v-for="line in paidLines(m.plan.lines)" :key="line.sku" :data-sku="line.sku" data-testid="product-reason">
+                  <p><strong>{{ line.name }}</strong>: <span class="muted">{{ $t('agentCards.reason') }}:</span> {{ line.product_reason || line.reason }}</p>
+                </article>
+              </section>
               <p class="bubble">{{ summary(m.plan) }}</p>
               <p v-if="m.plan.question && m.plan.question !== m.plan.reply" class="bubble">{{ m.plan.question }}</p>
               <SettlementCard
                 v-if="m.plan.settlement && !m.plan.payment?.success"
                 :settlement="m.plan.settlement"
                 :can-edit="isBasketReview(m.plan)"
-                :can-pay="canPay(m.plan)"
+                :can-pay="canPay(m.plan) && !m.paymentUncertain"
                 class="msg-card"
                 @edit="openBasket(m)"
                 @pay="openPay(m)"
@@ -573,15 +671,28 @@ async function approvePay() {
               <PaymentDraftCard
                 v-if="m.plan.payment_draft && !m.plan.settlement && !m.plan.payment?.success"
                 :draft="m.plan.payment_draft"
-                :busy="deciding || busy"
+                :busy="deciding || busy || m.paymentUncertain"
                 class="msg-card"
                 @authorize="onAuthorize(m)"
               />
+              <section v-if="m.paymentError || m.settlementError || m.orderSaved" class="card recovery-card" aria-live="polite">
+                <template v-if="m.paymentError && !m.plan.payment?.success">
+                  <p role="alert">{{ m.paymentError }}</p>
+                  <button v-if="m.paymentUncertain && (m.plan.payment?.payment_id || m.plan.payment_draft?.payment_id)" type="button" class="btn" data-testid="recover-payment" :disabled="deciding || busy" @click="capturePayment(m, true)">{{ $t('agentCards.recoverPayment') }}</button>
+                  <button v-else-if="!m.paymentUncertain" type="button" class="btn" :disabled="deciding || busy" @click="onAuthorize(m)">{{ $t('agentCards.retryPayment') }}</button>
+                </template>
+                <template v-if="m.settlementError">
+                  <p role="alert">{{ $t('agentCards.settlementFailed') }}</p>
+                  <p v-if="m.settlementError !== $t('agentCards.settlementFailed')" class="muted small">{{ m.settlementError }}</p>
+                  <button type="button" class="btn" data-testid="recover-orders" :disabled="m.savingOrder" @click="recoverSettlement(m)">{{ $t('agentCards.retrySettlement') }}</button>
+                </template>
+                <p v-else-if="m.orderSaved">{{ $t('agentCards.settlementSaved') }}</p>
+              </section>
               <button type="button" class="link-btn msg-steps-btn" :aria-expanded="Boolean(openSteps[m.id])" @click="openSteps[m.id] = !openSteps[m.id]">
                 <Icon :icon="openSteps[m.id] ? ArrowUp01Icon : ArrowDown01Icon" :size="16" />
-                {{ openSteps[m.id] ? $t('agentChat.hideSteps') : $t('agentChat.showSteps', { n: m.plan.audit_log.length }) }}
+                {{ openSteps[m.id] ? $t('agentChat.hideSteps') : $t('agentChat.showSteps', { n: (m.plan.audit_log || []).length }) }}
               </button>
-              <TraceList v-if="openSteps[m.id]" :entries="m.plan.audit_log" class="msg-card" />
+              <TraceList v-if="openSteps[m.id]" :entries="m.plan.audit_log || []" class="msg-card" />
             </template>
           </div>
 
@@ -632,6 +743,11 @@ async function approvePay() {
         <p class="muted small agent-hint">{{ spentHint }}</p>
       </section>
 
+      <RouterLink v-if="session.user" to="/profile" class="link-btn">{{ $t('agentCards.editLimits') }}</RouterLink>
+<section v-if="session.user" class="card recovery-card">
+        <button type="button" class="btn" data-testid="recover-account-orders" :disabled="recoveringOrders" @click="recoverAccountOrders">{{ $t('agentCards.recoverOrders') }}</button>
+        <p v-if="recoveryNotice" role="status">{{ recoveryNotice }}</p>
+      </section>
       <RulesCard :rules="rules" />
       <ComparisonCard :comparison="contract.comparison" />
 
@@ -644,16 +760,25 @@ async function approvePay() {
       v-if="basketOpen"
       :lines="sheetLines"
       :busy="deciding"
+      :meal="sheetMessage?.plan?.meal || null"
+      :policy="sheetMessage?.plan?.policy || null"
+      :notice="basketNotice"
+      :intent="sheetMessage?.plan?.intent || ''"
       @close="basketOpen = false"
       @confirm="confirmBasket"
       @remove="removeLine"
       @qty="changeQty"
+      @swap="swapLine"
     />
     <PaymentSheet
       v-if="payOpen && sheetMessage"
       :plan="sheetMessage.plan"
       :seconds="paySeconds"
       :busy="deciding"
+      :error="sheetMessage.paymentError || ''"
+      :uncertain="Boolean(sheetMessage.paymentUncertain)"
+      :can-recover="Boolean(sheetMessage.plan.payment?.payment_id || sheetMessage.plan.payment_draft?.payment_id)"
+      @recover="capturePayment(sheetMessage, true)"
       @close="closePay"
       @approve="approvePay"
     />

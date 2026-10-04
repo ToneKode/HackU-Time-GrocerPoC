@@ -25,6 +25,8 @@ def env(name: str, default: str = "") -> str:
 
 def settings() -> dict:
     return {
+        "demo_admin_emails": [email.strip().lower() for email in env("DEMO_ADMIN_EMAILS", "demo-admin@example.com").split(",") if email.strip()],
+        "payment_url": env("PAYMENT_URL", "http://127.0.0.1:8004"),
         "port": int(env("PERSISTANCE_PORT", "8003")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
         # Host MySQL listens on 3306. Tests use time_grocer_test, not this

@@ -22,6 +22,27 @@ npm run dev
 
 Open http://localhost:5173.
 
+## Share the local demo with ngrok
+
+Keep the MySQL-backed services running on 8001–8004. The Vite server proxies `/api/agent`, `/api/policy`, and `/api/persistence` to the local APIs, so public visitors use the same HTTPS address for the app and its API requests.
+
+Start the tunnel in another PowerShell terminal:
+
+```powershell
+ngrok http http://localhost:5173
+```
+
+Copy the hostname from the HTTPS forwarding URL. Before starting Vite, allow that specific hostname:
+
+```powershell
+$env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = 'YOUR-HOST.ngrok-free.app'
+npm run dev
+```
+
+If Vite is already running, stop that instance and restart it with the hostname set. Open the ngrok HTTPS URL; on the free ngrok warning page, select **Visit Site**. Keep ngrok, Vite, and the backend services running while sharing the demo. MySQL remains local.
+
+The optional `VITE_AGENT_URL`, `VITE_POLICY_URL`, and `VITE_PERSISTANCE_URL` variables override the proxy defaults; leave them unset for a single ngrok URL.
+
 ## Live agent
 
 The shop calls the agent on port 8002 and the policy engine on port 8001. It does not open a database. Login and the cart stay in the browser. Replies are cards, not a JSON dump.

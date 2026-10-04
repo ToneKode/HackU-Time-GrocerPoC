@@ -11,12 +11,13 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import redis
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 import policy_engine
+import decisions as decision_stats
 from audit_log import make_audit_log
 from config import (BULK_CEILING, CATEGORY_BLACKLIST, CURRENCY, MERCHANT_BLACKLIST, MERCHANT_WHITELIST,
                     MONTHLY_CAP, PER_TRANSACTION_CAP, settings)
@@ -29,6 +30,7 @@ USING_FAKEREDIS = S["redis_url"].startswith("fakeredis")
 USING_POSTGRES = bool(S["database_url"])
 audit = make_audit_log(S["database_url"], S["ledger_path"])
 escalations = Escalations(make_redis(S["redis_url"]), audit, S["ttl"], S["signing_secret"])
+decision_log = decision_stats.make_decision_log(S["database_url"], S["decisions_path"])
 
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -92,6 +94,10 @@ class CheckPolicyIn(BaseModel):
     monthly_cap: float | None = Field(default=None, ge=0)
     per_transaction_cap: float | None = Field(default=None, ge=0)
     bulk_ceiling: float | None = Field(default=None, ge=0)
+    # Optional tags so the verdict is recorded per shopper (dashboard stats).
+    account_id: str | None = Field(default=None, max_length=64)
+    run_id: str | None = Field(default=None, max_length=64)
+    stage: str | None = Field(default=None, max_length=32)
 
 
 class LogEventIn(BaseModel):
@@ -113,6 +119,9 @@ class CreateEscalationIn(BaseModel):
     monthly_cap: float | None = Field(default=None, ge=0)
     per_transaction_cap: float | None = Field(default=None, ge=0)
     bulk_ceiling: float | None = Field(default=None, ge=0)
+    account_id: str | None = Field(default=None, max_length=64)
+    run_id: str | None = Field(default=None, max_length=64)
+    order_id: str | None = Field(default=None, max_length=64)
 
 
 class DecisionIn(BaseModel):
@@ -148,7 +157,44 @@ def _caps(body) -> dict:
 
 @app.post("/check_policy")
 def check_policy(body: CheckPolicyIn) -> dict:
-    return policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent, **_caps(body))
+    result = policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent, **_caps(body))
+    if body.account_id:
+        _record(
+            account_id=body.account_id, run_id=body.run_id, stage=body.stage, kind="check",
+            status=result["status"], rule=result["rule"], reason=result["reason"], amount=result["amount"],
+            merchant=body.merchant, category=body.category, sku=body.sku, qty=body.qty,
+        )
+    return result
+
+
+def _record(**values) -> None:
+    # Stats are best effort: a store hiccup must never change a policy verdict.
+    try:
+        decision_log.record(**values)
+    except Exception as exc:
+        log.error("policy decision not recorded: %s", exc)
+
+
+def _escalation_status(escalation_id: str | None) -> str | None:
+    if not escalation_id:
+        return None
+    try:
+        return escalations.get(escalation_id).get("status")
+    except NotFound:
+        return "UNKNOWN"
+    except redis.RedisError:
+        return None
+
+
+@app.get("/policy_stats/{account_id}")
+def policy_stats(account_id: str, recent: int = Query(default=10, ge=1, le=50)) -> dict:
+    """How often this shopper's agent runs failed the policy check, per rule, with examples."""
+    rows = decision_log.for_account(account_id)
+    out = decision_stats.stats(rows, _escalation_status, recent=recent)
+    out["account_id"] = account_id
+    out["ledger"] = decision_stats.ledger_summary(audit.entries())
+    out["source"] = "policy_decisions" if USING_POSTGRES else "decisions.jsonl"
+    return out
 
 
 @app.post("/log_event")
@@ -172,7 +218,16 @@ def create_escalation(body: CreateEscalationIn) -> dict:
     check = policy_engine.evaluate(body.merchant, body.category, body.amount, body.monthly_spent, **_caps(body))
     if check["status"] != "ESCALATE":
         raise HTTPException(422, f"Cannot escalate: {check['reason']}")
-    return escalations.create(body.amount, body.currency, body.merchant, body.sku, body.qty, body.reason)
+    record = escalations.create(body.amount, body.currency, body.merchant, body.sku, body.qty, body.reason,
+                                account_id=body.account_id, run_id=body.run_id, order_id=body.order_id)
+    if body.account_id:
+        _record(
+            account_id=body.account_id, run_id=body.run_id, stage="escalation", kind="escalation",
+            status=record.get("status") or "PENDING", rule=check["rule"], reason=body.reason, amount=body.amount,
+            merchant=body.merchant, category=body.category, sku=body.sku, qty=body.qty,
+            escalation_id=record.get("escalation_id"),
+        )
+    return record
 
 
 @app.get("/escalations/{escalation_id}")
@@ -218,4 +273,5 @@ def demo_reset() -> dict:
         raise HTTPException(404)
     audit.reset()
     escalations.r.flushdb()
+    decision_log.reset()
     return {"reset": True}

@@ -31,8 +31,8 @@ def charge_local(amount: float, rail: str, idempotency_key: str) -> dict[str, An
             "payment_route": rail,
             "ts": _ts(),
         }
-    order_id = "ORD-" + uuid.uuid4().hex[:8]
-    auth_id = "AUTH-" + uuid.uuid4().hex[:10]
+    order_id = "ORD-" + uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key).hex[:8]
+    auth_id = "AUTH-" + uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key + ":auth").hex[:10]
     return {
         "success": True,
         "error": None,
@@ -85,7 +85,7 @@ def _charge_remote(
         "auth_id": body.get("order_id") and ("AUTH-" + str(body["order_id"])),
         "order_id": body.get("order_id"),
         "charged": body.get("charged"),
-        "currency": body.get("currency") or "HKD",
+        "currency": body.get("currency"),
         "payment_route": body.get("payment_route") or rail,
         "reward_points_earned": body.get("reward_points_earned"),
         "ts": body.get("ts") or _ts(),

@@ -4,6 +4,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from decimal import Decimal, InvalidOperation
+
+import httpx
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
@@ -11,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from basket_payments import authorize_basket, basket_router
 from config import settings
 from rails import charge
 from recommender import pick_rail, recommend
@@ -66,6 +70,7 @@ class DraftIn(BaseModel):
     preferred_rail: str | None = None
     sku: str = ""
     qty: int = 1
+    lines: list[dict] | None = None
 
 
 class AuthorizeIn(BaseModel):
@@ -103,6 +108,13 @@ def payment_recommend(body: RecommendIn) -> dict:
 
 @app.post("/payment/draft")
 def payment_draft(body: DraftIn) -> dict:
+    quote = None
+    if body.lines is not None:
+        quote = fetch_market_quote(body.lines)
+        if len(quote["merchants"]) != 1 or quote["merchants"][0]["merchant"] != body.merchant:
+            raise HTTPException(422, "Draft lines must belong to its merchant")
+        if Decimal(str(quote["total"])) != Decimal(str(body.amount)):
+            raise HTTPException(409, {"message": "Catalog price or promotion changed; approve a new quote", "quote": quote})
     choice = pick_rail(
         body.amount,
         merchants=[body.merchant],
@@ -136,9 +148,29 @@ def payment_draft(body: DraftIn) -> dict:
         token=token,
         recommendation=choice,
     )
+    if quote is not None:
+        record["market_quote"] = quote
     record.update(assess(body.amount, rail, choice.get("rail")))
     store.put(record)
     return _public(record)
+
+
+def fetch_market_quote(lines):
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.post(S["persistance_url"] + "/market/quote", json={"lines": lines})
+            if response.status_code == 422:
+                raise HTTPException(422, response.json().get("detail", "Invalid catalog lines"))
+            response.raise_for_status()
+            quote = response.json()
+            if not isinstance(quote, dict) or not isinstance(quote.get("promotion_snapshot"), dict):
+                raise ValueError("Invalid market quote")
+            return quote
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise HTTPException(503, "Market pricing unavailable; retry draft") from exc
+
+
+app.include_router(basket_router(store, payment_draft, DraftIn, fetch_market_quote))
 
 
 @app.post("/payment/authorize")
@@ -146,8 +178,21 @@ def payment_authorize(body: AuthorizeIn) -> dict:
     record = store.get(body.payment_id)
     if record is None:
         raise HTTPException(404, f"Unknown payment: {body.payment_id}")
+    if record.get("children"):
+        return authorize_basket(store, payment_authorize, AuthorizeIn, record, body.step_up_confirmed, _prepare_attempt)
     if record["status"] in {"AUTHORIZED", "CAPTURED"}:
         return _public(record)
+    if record["status"] == "PENDING":
+        return _charge_attempt(record)
+    record = _prepare_attempt(record, body)
+    if record["status"] == "CAPTURED":
+        return _public(record)
+    return _charge_attempt(record)
+
+
+def _prepare_attempt(record: dict, body: AuthorizeIn) -> dict:
+    if record["status"] in {"PENDING", "CAPTURED"}:
+        return record
     if record["status"] not in {"DRAFT", "FAILED"}:
         raise HTTPException(409, f"Cannot authorize from status {record['status']}")
 
@@ -167,29 +212,45 @@ def payment_authorize(body: AuthorizeIn) -> dict:
         raise HTTPException(403, "Token does not match payment draft")
     if float(claims["amt"]) != float(record["amount"]):
         raise HTTPException(403, "Token amount mismatch")
+    if claims.get("sub") != record["account_id"] or claims.get("cur") != record["currency"]:
+        raise HTTPException(403, "Token account or currency mismatch")
     if claims.get("aud") != record["merchant"]:
         raise HTTPException(403, "Token merchant mismatch")
 
     if record.get("step_up_required") and not body.step_up_confirmed:
         raise HTTPException(403, "step_up_required")
 
-    if not store.mark_jti_used(claims["jti"]):
-        # Idempotent replay of same token after success is handled above;
-        # a second charge attempt with a burned jti is rejected.
-        raise HTTPException(409, "Token already used")
+    # The rail key is scoped to the draft, never supplied by a caller.
+    record["attempt_key"] = f"{record['payment_id']}:{claims['jti']}"
+    record["status"] = "PENDING"
+    record["attempt_started"] = True
+    if body.step_up_confirmed:
+        record["evidence"] = list(dict.fromkeys(record["evidence"] + ["step_up_confirmed"]))
+    try:
+        record = store.begin_attempt(record)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return record
 
-    key = body.idempotency_key or f"{record['payment_id']}:{claims['jti']}"
-    result = charge(
-        amount=record["amount"],
-        rail=record["rail"],
-        idempotency_key=key,
-        acquirer_url=S["mock_acquirer_url"],
-    )
+
+def _charge_attempt(record: dict) -> dict:
+    try:
+        result = charge(
+            amount=record["amount"],
+            rail=record["rail"],
+            idempotency_key=record["attempt_key"],
+            acquirer_url=S["mock_acquirer_url"],
+        )
+        if not isinstance(result, dict):
+            raise ValueError("Invalid rail response")
+    except (httpx.HTTPError, ValueError) as exc:
+        record["status"] = "PENDING"
+        record["error"] = f"rail_result_unknown:{type(exc).__name__}"
+        store.put(record)
+        return _public(record)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     record["updated_at"] = now
     evidence = list(record.get("evidence") or [])
-    if body.step_up_confirmed and "step_up_confirmed" not in evidence:
-        evidence.append("step_up_confirmed")
     if "authorized" not in evidence:
         evidence.append("authorized")
     if not result.get("success"):
@@ -199,6 +260,21 @@ def payment_authorize(body: AuthorizeIn) -> dict:
         store.put(record)
         return _public(record)
 
+    try:
+        matches = (
+            Decimal(str(result.get("charged"))) == Decimal(str(record["amount"]))
+            and result.get("currency") == record["currency"]
+            and bool(result.get("order_id"))
+        )
+    except (InvalidOperation, ValueError):
+        matches = False
+    if not matches:
+        record["status"] = "PENDING"
+        record["error"] = "rail_amount_or_currency_mismatch"
+        store.put(record)
+        return _public(record)
+    record["rail_verified"] = True
+    record["charged_currency"] = result["currency"]
     record["status"] = "AUTHORIZED"
     record["auth_id"] = result.get("auth_id")
     record["order_id"] = result.get("order_id")
@@ -214,6 +290,20 @@ def payment_authorize(body: AuthorizeIn) -> dict:
     record["evidence"] = evidence
     store.put(record)
     return _public(record)
+
+
+@app.post("/payment/{payment_id}/recover")
+def payment_recover(payment_id: str) -> dict:
+    record = store.get(payment_id)
+    if record is None:
+        raise HTTPException(404, f"Unknown payment: {payment_id}")
+    if record["status"] == "CAPTURED":
+        return _public(record)
+    if record.get("children") and record["status"] == "PENDING" and record.get("attempt_started"):
+        return authorize_basket(store, payment_authorize, AuthorizeIn, record, False, _prepare_attempt)
+    if record["status"] != "PENDING" or not record.get("attempt_started") or not record.get("attempt_key"):
+        raise HTTPException(409, "No unresolved payment attempt")
+    return _charge_attempt(record)
 
 
 @app.post("/payment/{payment_id}/capture")
@@ -278,6 +368,12 @@ def payment_evidence(payment_id: str) -> dict:
         "refund_reason": public.get("refund_reason"),
         "error": public.get("error"),
         "evidence": public.get("evidence") or [],
+        "allocations": public.get("allocations") or [],
+        "captures": public.get("captures") or [],
+        "partial_captures": public.get("partial_captures") or [],
+        "charged": public.get("charged"),
+        "charged_currency": public.get("charged_currency"),
+        "rail_verified": public.get("rail_verified", False),
         "created_at": public.get("created_at"),
         "updated_at": public.get("updated_at"),
     }

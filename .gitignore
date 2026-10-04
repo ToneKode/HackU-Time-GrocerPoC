@@ -37,6 +37,13 @@ Thumbs.db
 *.log
 .uvicorn/
 *.pid
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.db
+backend-policy/data/
+ignore_dont_push/
+/openrouter
 
 # Node (frontend later)
 node_modules/

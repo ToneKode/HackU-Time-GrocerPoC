@@ -1,4 +1,6 @@
 <script setup>
+import GiftList from './GiftList.vue'
+import { giftLines, paidLines } from '../lib/format.js'
 import { money } from '../lib/format.js'
 import { productName, storeName } from '../i18n/index.js'
 
@@ -10,12 +12,13 @@ defineProps({ plan: { type: Object, required: true } })
     <h2>{{ plan.payment ? $t('agentCards.orderTitle') : $t('agentCards.basketTitle') }}</h2>
     <!-- Product names are untrusted plain text: always {{ }}, never v-html. -->
     <ul v-if="plan.lines?.length" class="basket-lines">
-      <li v-for="line in plan.lines" :key="line.sku">
+      <li v-for="line in paidLines(plan.lines)" :key="line.sku">
         {{ line.name }}
         <span class="muted"> · {{ storeName(line.merchant) }} · ×{{ line.qty }} · {{ money(line.line_total) }}</span>
       </li>
     </ul>
     <p v-else-if="plan.product" class="product-name">{{ productName(plan.product) }}</p>
+    <GiftList :gifts="giftLines(plan)" />
     <dl class="rows">
       <template v-if="!plan.lines?.length && plan.product">
         <dt>{{ $t('agentCards.merchant') }}</dt><dd>{{ storeName(plan.product.merchant) }}</dd>

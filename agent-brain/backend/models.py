@@ -45,6 +45,11 @@ class Product(BaseModel):
 
 
 class CartLine(BaseModel):
+    is_gift: bool = False
+    gift_for_sku: str = ""
+    purchased_qty: int | None = None
+    promotion_id: str = ""
+    rules_version: int | None = None
     sku: str
     name: str
     merchant: str
@@ -88,6 +93,10 @@ class PayResult(BaseModel):
     discount: float | None = None
     total_before_discount: float | None = None
     payment_id: str | None = None
+    settlement_saved: bool | None = None
+    settlement_pending: bool = False
+    retryable: bool = False
+    status: str | None = None
 
 
 class PaymentDraft(BaseModel):
@@ -117,6 +126,11 @@ class Escalation(BaseModel):
 
 
 class BasketLine(BaseModel):
+    is_gift: bool = False
+    gift_for_sku: str = ""
+    purchased_qty: int | None = None
+    promotion_id: str = ""
+    rules_version: int | None = None
     need: str
     priority: int
     sku: str
@@ -178,4 +192,7 @@ class ActionPlan(BaseModel):
     question: str = ""
     reply: str = ""
     react: list[ReactStep] = Field(default_factory=list)
+    # Meal-plan optimiser output: parsed request, spend band, food-group coverage,
+    # payment comparison and band warnings. None for ordinary requests.
+    meal: dict | None = None
     audit_log: list[AuditEntry]

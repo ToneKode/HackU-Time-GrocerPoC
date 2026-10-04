@@ -1,6 +1,8 @@
 <script setup>
+import GiftList from './GiftList.vue'
+import { giftLines, paidLines } from '../lib/format.js'
 import { ref } from 'vue'
-import { money } from '../lib/format.js'
+import { money, reasonParts } from '../lib/format.js'
 
 defineProps({
   settlement: { type: Object, required: true },
@@ -25,11 +27,13 @@ const open = ref(false)
           {{ group.payment?.label }}
           <template v-if="group.payment?.amount != null"> · {{ money(group.payment.amount) }}</template>
         </p>
-        <p v-for="line in group.lines || []" :key="line.sku" class="muted small">
+        <div v-if="group.because" class="benefit-rationale" data-testid="benefit-rationale"><p v-for="part in reasonParts(group.because)" :key="part" class="muted small">{{ part }}</p></div>
+        <p v-for="line in paidLines(group.lines)" :key="line.sku" class="muted small">
           {{ line.name }} × {{ line.qty }}
         </p>
       </li>
     </ul>
+    <GiftList :gifts="giftLines(settlement)" />
     <div class="actions">
       <button v-if="canEdit" type="button" class="btn" @click="emit('edit')">{{ $t('agentCards.sheetTitle') }}</button>
       <button v-if="canPay" type="button" class="btn primary" @click="emit('pay')">{{ $t('agentCards.approvePay') }}</button>

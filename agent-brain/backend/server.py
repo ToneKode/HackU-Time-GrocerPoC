@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -70,6 +70,12 @@ class ConfirmBasketIn(BaseModel):
     removed_skus: list[str] = Field(default_factory=list)
 
 
+class AlternativesIn(BaseModel):
+    intent: str = ""
+    sku: str = Field(min_length=1)
+    exclude_skus: list[str] = Field(default_factory=list)
+
+
 class ApproveBasketIn(BaseModel):
     amount: float
     payment_id: str | None = None
@@ -95,7 +101,34 @@ def products_from_persistance(base: str) -> list[dict]:
         return []
     if "id" not in body[0] or "price" not in body[0]:
         return []
-    return body
+    return [_normalize_row(row) for row in body]
+
+
+FULL_CATALOG = Path(__file__).resolve().parent.parent / "hk_products_full.json"
+
+
+def _normalize_row(row: dict) -> dict:
+    """Keep unknown stock distinct from a known zero for allocation tools."""
+    return dict(row)
+
+
+def products_from_file(path: Path = FULL_CATALOG) -> list[dict]:
+    """The real 5k-row HK catalog, used when persistance :8003 is down.
+
+    Before this, the agent fell back to the 30-row fake_mall shelf, so meal
+    plans were built from a handful of demo products.
+    """
+    if os.environ.get("AGENT_CATALOG", "").strip().lower() == "fake":
+        return []
+    try:
+        import json
+
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [_normalize_row(row) for row in rows if isinstance(row, dict) and "id" in row and "price" in row]
 
 
 def _scripted_planner(intent: str, catalog: list[dict]) -> dict:
@@ -150,6 +183,8 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             rows = products_from_persistance(
                 os.environ.get("PERSISTANCE_API_BASE_URL", "http://localhost:8003")
             )
+            if not rows:
+                rows = products_from_file()
             mall = FileMall(products=rows) if rows else FileMall()
         planner = None
         if os.environ.get("USE_SCRIPTED_PLANNER", "").lower() in {"1", "true", "yes"}:
@@ -189,6 +224,24 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
         )
         return PayResult.model_validate(result)
 
+    @app.post("/agent/basket/optimize")
+    def optimize_basket(body: ConfirmBasketIn) -> dict:
+        try:
+            return shopping.tools["optimize_basket"](
+                body.intent, [line.model_dump() for line in body.lines], account_id=body.account_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/agent/payment/recover", response_model=PayResult)
+    def agent_recover(body: ConfirmPaymentIn) -> PayResult:
+        account = (body.account_id or os.environ.get("ACCOUNT_ID") or "demo").strip() or "demo"
+        return PayResult.model_validate(shopping.recover_payment(body.payment_id, account_id=account))
+
+    @app.post("/agent/orders/recover")
+    def recover_orders(account_id: str = "demo") -> dict:
+        return shopping.recover_orders(account_id)
+
     @app.post("/agent/basket/confirm", response_model=ActionPlan)
     def basket_confirm(body: ConfirmBasketIn) -> ActionPlan:
         plan = shopping.confirm_basket(
@@ -199,6 +252,14 @@ def create_app(agent: ShoppingAgent | None = None) -> FastAPI:
             account_id=body.account_id,
         )
         return ActionPlan.model_validate(plan)
+
+    @app.post("/agent/basket/alternatives")
+    def basket_alternatives(body: AlternativesIn) -> dict:
+        """Swap options for one basket line, from the real catalog (same food group)."""
+        return {
+            "sku": body.sku,
+            "alternatives": shopping.basket_alternatives(body.intent, body.sku, body.exclude_skus),
+        }
 
     @app.post("/agent/basket/approve", response_model=PayResult)
     def basket_approve(body: ApproveBasketIn) -> PayResult:

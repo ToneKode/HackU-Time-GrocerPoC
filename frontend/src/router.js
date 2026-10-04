@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from './views/HomeView.vue'
+import { session, syncProfile } from './stores/auth.js'
+import { getProfile } from './lib/api.js'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -19,7 +21,23 @@ export const router = createRouter({
     { path: '/privacy', name: 'privacy', component: () => import('./views/LegalView.vue'), meta: { doc: 'privacy' } },
     { path: '/agent', name: 'agent', component: () => import('./views/AgentView.vue'), meta: { fullHeight: true } },
     { path: '/profile', name: 'profile', component: () => import('./views/ProfileView.vue') },
+    { path: '/admin/market', name: 'market-settings', component: () => import('./views/MarketSettingsView.vue'), meta: { admin: true } },
+    { path: '/dashboard', name: 'dashboard', component: () => import('./views/DashboardView.vue') },
   ],
   // Section links (#s-3) scroll below the sticky header; every other navigation starts at the top.
   scrollBehavior: (to) => (to.hash ? { el: to.hash, top: 80, behavior: 'smooth' } : { top: 0 }),
+})
+
+router.beforeEach(async (to) => {
+  if (!to.meta.admin) return
+  const id = session.user?.id
+  if (!id) return { name: 'login' }
+  try {
+    const profile = await getProfile(id)
+    if (session.user?.id !== id) return { name: 'home' }
+    syncProfile(profile, id)
+    if (session.user?.role !== 'admin') return { name: 'home' }
+  } catch {
+    return { name: 'home' }
+  }
 })

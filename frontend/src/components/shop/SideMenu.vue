@@ -7,7 +7,7 @@ import {
   Cancel01Icon, Login01Icon, UserAdd01Icon, Logout01Icon, TranslateIcon, Moon02Icon, FavouriteIcon, UserCheck01Icon,
   InformationCircleIcon, LegalDocument01Icon, ReturnRequestIcon, Shield01Icon,
   ArrowRight01Icon, ArrowLeft01Icon, Tick02Icon,
-  Sun03Icon, ComputerIcon,
+  Sun03Icon, ComputerIcon, Analytics01Icon,
 } from '@hugeicons/core-free-icons'
 import { useI18n } from 'vue-i18n'
 import { LOCALES, setLocale } from '../../i18n/index.js'
@@ -53,6 +53,15 @@ const settings = computed(() => {
   ]
   if (session.user) {
     rows.unshift({
+      id: 'dashboard',
+      icon: Analytics01Icon,
+      label: t('menu.dashboard'),
+      action: () => {
+        router.push('/dashboard')
+        emit('close')
+      },
+    })
+    rows.unshift({
       id: 'profile',
       icon: UserCheck01Icon,
       label: t('menu.profile'),
@@ -62,6 +71,10 @@ const settings = computed(() => {
       },
     })
   }
+  if (session.user?.role === 'admin') rows.unshift({
+    id: 'market-settings', icon: Shield01Icon, label: 'Market settings',
+    action: () => { router.push('/admin/market'); emit('close') },
+  })
   return rows
 })
 const pages = computed(() => [
@@ -182,7 +195,7 @@ onBeforeUnmount(() => {
 
         <!-- Settings -->
         <section class="menu-section menu-view">
-          <button v-for="item in settings" :key="item.id" type="button" class="menu-row" @click="item.action?.()">
+          <button v-for="item in settings" :key="item.id" :data-testid="item.id" type="button" class="menu-row" @click="item.action?.()">
             <Icon :icon="item.icon" :size="20" class="menu-row-icon" />
             <span class="menu-row-text">
               <span v-if="item.value" class="menu-row-label">{{ item.label }}</span>
@@ -195,7 +208,7 @@ onBeforeUnmount(() => {
 
         <!-- Info pages -->
         <section class="menu-section">
-          <button v-for="item in pages" :key="item.id" type="button" class="menu-row" @click="router.push(`/${item.id}`)">
+          <button v-for="item in pages" :key="item.id" :data-testid="item.id" type="button" class="menu-row" @click="router.push(`/${item.id}`)">
             <Icon :icon="item.icon" :size="20" class="menu-row-icon" />
             <span class="menu-row-main">{{ item.label }}</span>
           </button>

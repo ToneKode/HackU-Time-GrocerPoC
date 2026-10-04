@@ -83,6 +83,13 @@ def _ledger_path() -> str:
     return path if os.path.isabs(path) else str(BASE_DIR / path)
 
 
+def _decisions_path() -> str:
+    path = env("DECISIONS_PATH", "")
+    if not path:
+        return str(Path(_ledger_path()).with_name("decisions.jsonl"))
+    return path if os.path.isabs(path) else str(BASE_DIR / path)
+
+
 def _redis_url() -> str:
     # Explicit REDIS_URL always wins (tests set fakeredis://).
     if "REDIS_URL" in os.environ:
@@ -110,6 +117,7 @@ def settings() -> dict:
         "redis_url": _redis_url(),
         "database_url": _database_url(),
         "ledger_path": _ledger_path(),
+        "decisions_path": _decisions_path(),
         "ttl": int(env("ESCALATION_TTL_SECONDS", "600")),
         "signing_secret": env("APPROVAL_SIGNING_SECRET", "dev-secret-change-me"),
         "require_signature": env("REQUIRE_SIGNATURE", "false").lower() == "true",

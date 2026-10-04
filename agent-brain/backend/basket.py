@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from benefits import explain_pick, rank_candidates
+from meal_plan import plan_meal
 from pick import _match_query, normalize_sell_point
 from policy_rules import CATEGORY_BLACKLIST, WHITELIST
 
@@ -86,11 +87,6 @@ def needs_for_every_category(intent: str, catalog: list[dict]) -> dict | None:
     }
 
 
-_GROCERY = (
-    ("rice", 42.0, 7),
-    ("water", 18.0, 3),
-    ("potato chips", 8.9, 2),
-)
 _VAGUE = ("something", "whatever", "anything", "not sure", "you decide", "up to you")
 _NAMED_PRODUCT = (
     "toilet",
@@ -107,32 +103,10 @@ _NAMED_PRODUCT = (
 
 
 def plan_fuzzy(intent: str, catalog: list[dict]) -> dict | None:
-    """A meal plan becomes several ingredients. A sentence with no product asks back.
-
-    catalog is unused; the shelf prices below match the cheap edible lines.
-    """
-    del catalog
+    """A meal plan is filled from the edible shelf. A sentence with no product asks back."""
     text = intent.casefold()
     if _is_meal_plan(text):
-        days = _days(text) or 7
-        budget = _budget(text) or 500.0
-        needs, landed = _grocery_guess(days, budget)
-        note = (
-            f"Fuzzy request: food for {days} days, budget HK${budget:.0f}. "
-            f"Guessed rice, water, and potato chips in quantities for those days, "
-            f"landed HK${landed:.2f}. "
-            "The HK$500 automatic cap is the most that can be paid without approval, "
-            "so the guess stays at or under that cap."
-        )
-        return {
-            "needs": needs,
-            "query": ", ".join(need["query"] for need in needs),
-            "qty": len(needs),
-            "sell_point": "cheap",
-            "thought": note,
-            "reply": note,
-            "model": "catalog",
-        }
+        return plan_meal(intent, catalog)
     if _is_too_vague(text):
         question = "What should I buy, or how many days and what budget should it cover?"
         return {
@@ -174,27 +148,6 @@ def _budget(text: str) -> float | None:
         if match:
             return float(match.group(1))
     return None
-
-
-def _grocery_guess(days: int, budget: float) -> tuple[list[dict], float]:
-    """Cheap edible lines, scaled to the days, then trimmed to the payable cap."""
-    limit = min(float(budget), 500.0)
-    plan = [[query, max(1, (days + span - 1) // span), price] for query, price, span in _GROCERY]
-    while plan and _guess_landed(plan) > limit + 0.001:
-        if plan[-1][1] > 1:
-            plan[-1][1] -= 1
-        else:
-            plan.pop()
-    needs = []
-    for index, (query, qty, _price) in enumerate(plan):
-        needs.append({"query": query, "qty": qty, "sell_point": "cheap", "priority": index + 1})
-    return needs, _guess_landed(plan) if plan else 0.0
-
-
-def _guess_landed(plan: list[list]) -> float:
-    subtotal = money(sum(price * qty for _query, qty, price in plan))
-    shipping = 0.0 if subtotal >= 400 else 30.0
-    return money(subtotal + shipping)
 
 
 def _fallback_query(catalog: list[dict], category: str) -> str:

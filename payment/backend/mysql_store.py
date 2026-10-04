@@ -195,6 +195,23 @@ class MysqlPaymentStore:
                     inserted = cur.rowcount == 1
         return inserted
 
+    def begin_attempt(self, record: dict) -> dict:
+        """Commit the consumed token and retry key in one transaction."""
+        with self._connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM payments WHERE payment_id = %s FOR UPDATE", (record["payment_id"],))
+                current = _row_to_record(cur.fetchone())
+                if current["status"] in {"PENDING", "CAPTURED"}:
+                    return current
+                cur.execute("INSERT IGNORE INTO payment_jti (jti) VALUES (%s)", (record["token_jti"],))
+                if cur.rowcount != 1:
+                    raise ValueError("Token already used")
+                row = _to_row(record)
+                cur.execute("UPDATE payments SET status = %s, extra = %s, evidence = %s WHERE payment_id = %s",
+                            ("PENDING", row["extra"], row["evidence"], record["payment_id"]))
+            conn.commit()
+        return record
+
     def reset(self) -> None:
         with self._lock:
             with self._connect(self.database_url) as conn:

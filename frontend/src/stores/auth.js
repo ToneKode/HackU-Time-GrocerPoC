@@ -1,6 +1,6 @@
 // Signed-in session. The password is checked by the persistance API and is
 // never written here. The browser keeps the account id and the spending caps.
-import { reactive, computed } from 'vue'
+import { reactive, computed, watch } from 'vue'
 import { loginAccount, registerAccount } from '../lib/api.js'
 
 const STORAGE_KEY = 'tg-session'
@@ -14,6 +14,8 @@ function load() {
 }
 
 export const session = reactive({ user: load() })
+export let accountRevision = 0
+watch(() => session.user?.id, () => { accountRevision++ }, { flush: 'sync' })
 export const isLoggedIn = computed(() => Boolean(session.user))
 
 function setUser(user, remember = true) {
@@ -33,6 +35,8 @@ function sessionUser(profile) {
     name: profile.name,
     phone: profile.phone || null,
     membership: profile.membership,
+    role: profile.role,
+    is_admin: profile.role === 'admin',
     monthly_cap: profile.monthly_cap,
     per_order_cap: profile.per_order_cap,
     bulk_ceiling: profile.bulk_ceiling,
@@ -53,6 +57,12 @@ export async function register({ name, email, phone, password, marketing }) {
     marketing: Boolean(marketing),
   })
   setUser(sessionUser(profile), true)
+}
+
+export function syncProfile(profile, accountId = profile.id) {
+  if (!session.user || session.user.id !== accountId) return
+  const remember = Boolean(load())
+  setUser({ ...session.user, ...sessionUser({ ...session.user, ...profile, id: accountId }) }, remember)
 }
 
 export function logOut() {

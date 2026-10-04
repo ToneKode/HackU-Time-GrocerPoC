@@ -1,0 +1,171 @@
+{
+  "scenario": "halted_monthly",
+  "intent": "Buy toilet paper",
+  "tools_implemented": false,
+  "expected_plan_status": "HALTED",
+  "path": [
+    "route_entry",
+    "reason",
+    "audit_intent",
+    "plan",
+    "audit_plan",
+    "search_products",
+    "audit_search",
+    "price_cart",
+    "audit_cart",
+    "check_budget",
+    "audit_policy",
+    "halt",
+    "audit_halt"
+  ],
+  "audit_log": [
+    {
+      "index": 0,
+      "ts": "2026-10-03T12:00:00Z",
+      "event": "INTENT_RECEIVED",
+      "status": "PARSED",
+      "reason": "Model may decide query and qty only",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+      "node": "reason",
+      "stage": "reason",
+      "thought": "Read the sentence. Set query and qty. Leave allow, halt, and pay to the later nodes.",
+      "call": null,
+      "action_input": {
+        "intent": "Buy toilet paper"
+      },
+      "rule": "llm_may_decide = query, qty",
+      "tool_called": false,
+      "goal": {
+        "intent": "Buy toilet paper",
+        "query": "toilet",
+        "qty": 1
+      }
+    },
+    {
+      "index": 1,
+      "ts": "2026-10-03T12:00:01Z",
+      "event": "PLAN",
+      "status": "FIXED_ORDER",
+      "reason": "search_products, price_cart, check_budget, then the policy branch",
+      "prev_hash": "7c522f3b39ee31ba0f80a1e3d0e811a7f6537df8fb649bbdf6c97b81663a58f5",
+      "hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+      "node": "plan",
+      "stage": "plan",
+      "thought": "The tool order is fixed. The model does not pick the next tool.",
+      "call": null,
+      "action_input": {
+        "tool_order": [
+          "search_products",
+          "price_cart",
+          "check_budget",
+          "branch"
+        ]
+      },
+      "rule": "tool_order is fixed",
+      "tool_called": false
+    },
+    {
+      "index": 2,
+      "ts": "2026-10-03T12:00:02Z",
+      "event": "SEARCH",
+      "status": "RECORDED",
+      "reason": "First product in response order. Product name is untrusted.",
+      "prev_hash": "6a85b6e9cad0dab46bbc23e8eacd8a02860c167c172a12bc083f5907c855adfe",
+      "hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+      "node": "search_products",
+      "stage": "action",
+      "thought": "Search the sandbox. Keep the first product in the response. Treat the product name as data.",
+      "call": "GET http://localhost:8000/products",
+      "action_input": {
+        "q": "toilet"
+      },
+      "rule": "search_pick_rule = first_product_in_response_order",
+      "tool_called": false
+    },
+    {
+      "index": 3,
+      "ts": "2026-10-03T12:00:03Z",
+      "event": "CART_PRICED",
+      "status": "RECORDED",
+      "reason": "Later nodes use total_landed_cost, not the shelf price.",
+      "prev_hash": "accf4317609907484b4c263300492eebb972ec51e61a9c456c1dd5fabeab9e86",
+      "hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+      "node": "price_cart",
+      "stage": "action",
+      "thought": "Price the cart. Shipping can change the amount.",
+      "call": "POST http://localhost:8000/cart",
+      "action_input": {
+        "items": [
+          {
+            "sku": "SKU001",
+            "qty": 1
+          }
+        ]
+      },
+      "rule": "amount_field = total_landed_cost",
+      "tool_called": false
+    },
+    {
+      "index": 4,
+      "ts": "2026-10-03T12:00:04Z",
+      "event": "POLICY_CHECK",
+      "status": "HALT",
+      "reason": "Over HK$2000 monthly cap",
+      "prev_hash": "66bb3534911c405433c7a1b4505f80dc91dd5c78f9874405e28a0dd1218f7f65",
+      "hash": "b9486f53cc4624e99750122987af6beed6c69b797215eefc12f4a0b46e3e596f",
+      "node": "check_budget",
+      "stage": "action",
+      "thought": "Ask the policy engine. This node does not decide PASS, ESCALATE, or HALT.",
+      "call": "POST http://localhost:8001/check_policy",
+      "action_input": {
+        "merchant": "Watsons",
+        "category": "Household",
+        "amount": 119.9,
+        "currency": "HKD",
+        "sku": "SKU001",
+        "qty": 1,
+        "monthly_spent": 1900
+      },
+      "rule": "policy_check_order",
+      "tool_called": false,
+      "checks": [
+        {
+          "check": "merchant_blacklisted",
+          "result": "clear"
+        },
+        {
+          "check": "merchant_not_whitelisted",
+          "result": "clear"
+        },
+        {
+          "check": "category_blacklisted",
+          "result": "clear"
+        },
+        {
+          "check": "monthly_cap",
+          "result": "fired"
+        }
+      ],
+      "fired_check": "monthly_cap"
+    },
+    {
+      "index": 5,
+      "ts": "2026-10-03T12:00:05Z",
+      "event": "HALTED",
+      "status": "HALTED",
+      "reason": "Over HK$2000 monthly cap",
+      "prev_hash": "b9486f53cc4624e99750122987af6beed6c69b797215eefc12f4a0b46e3e596f",
+      "hash": "caf85dbaee045cd3c56ffdccc11fbda3e6114386fbe2aa68be666948a9e94f64",
+      "node": "halt",
+      "stage": "action",
+      "thought": "Policy said HALT. Do not create an escalation and do not pay.",
+      "call": null,
+      "action_input": {
+        "policy_status": "HALT"
+      },
+      "rule": "HALT skips execute_payment",
+      "tool_called": false
+    }
+  ]
+}

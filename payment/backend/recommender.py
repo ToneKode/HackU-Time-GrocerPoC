@@ -5,11 +5,47 @@ from pathlib import Path
 
 RAILS = ("mastercard", "unionpay")
 
-# Simple PoC fee / cashback model (HKD). Promo file can override later.
-RAIL_PROFILE = {
-    "mastercard": {"fee_rate": 0.0, "cashback_rate": 0.01, "label": "Mastercard"},
-    "unionpay": {"fee_rate": 0.0, "cashback_rate": 0.015, "label": "UnionPay"},
-}
+# Cashback rates come from agent-brain/backend/benefits.py (INSTRUMENTS), so the
+# draft's estimate agrees with the benefits the agent shows the shopper
+# (Mox Mastercard 2.4%). A rail agent-brain does not know earns no cashback.
+# TODO: production refreshes these rates daily from the card issuers' feeds
+# instead of reading a constant table.
+AGENT_BENEFITS = Path(__file__).resolve().parents[2] / "agent-brain" / "backend" / "benefits.py"
+# Used only when agent-brain is not deployed next to this service. Keep in step
+# with agent-brain benefits.INSTRUMENTS.
+FALLBACK_CASHBACK = {"mastercard": (0.024, "Mox Mastercard")}
+
+
+def _agent_rates() -> dict[str, tuple[float, str]]:
+    """route -> (cashback rate, label) from agent-brain's INSTRUMENTS table."""
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("tg_agent_benefits", AGENT_BENEFITS)
+        if spec is None or spec.loader is None:
+            return dict(FALLBACK_CASHBACK)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rates = {
+            str(row["route"]): (float(row.get("cashback") or 0.0), str(row.get("label") or row["route"]))
+            for row in module.INSTRUMENTS
+        }
+        return rates or dict(FALLBACK_CASHBACK)
+    except Exception:
+        return dict(FALLBACK_CASHBACK)
+
+
+def _rail_profiles() -> dict[str, dict]:
+    rates = _agent_rates()
+    labels = {"mastercard": "Mastercard", "unionpay": "UnionPay"}
+    out = {}
+    for rail in RAILS:
+        rate, label = rates.get(rail, (0.0, labels[rail]))
+        out[rail] = {"fee_rate": 0.0, "cashback_rate": rate, "label": label}
+    return out
+
+
+RAIL_PROFILE = _rail_profiles()
 
 PROMO_CANDIDATES = [
     Path(__file__).resolve().parents[2]
@@ -78,6 +114,8 @@ def recommend(
                 "promo_bonus": promo_bonus,
                 "promo_title": promo_title,
                 "net_benefit": net,
+                "cashback_rate": profile["cashback_rate"],
+                "rates_source": "agent-brain benefits.py",
                 "effective_cost": effective,
                 "currency": "HKD",
                 "preferred": preferred == rail,

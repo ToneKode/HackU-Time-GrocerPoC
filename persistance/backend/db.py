@@ -109,6 +109,24 @@ def apply_schema(database_url: str, schema_path: str | Path) -> None:
                     if exc.args and exc.args[0] in _IGNORE:
                         continue
                     raise
+            cur.execute("SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_entries' "
+                        "AND COLUMN_NAME IN ('reason', 'thought')")
+            for column in cur.fetchall():
+                if column["DATA_TYPE"].lower() != "longtext":
+                    name = column["COLUMN_NAME"]
+                    cur.execute(f"ALTER TABLE audit_entries MODIFY COLUMN `{name}` LONGTEXT NOT NULL")
+            cur.execute(
+                "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
+                "WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'payments_status_chk'"
+            )
+            constraint = cur.fetchone()
+            if constraint and "PENDING" not in constraint["CHECK_CLAUSE"]:
+                cur.execute("ALTER TABLE payments DROP CHECK payments_status_chk")
+                cur.execute(
+                    "ALTER TABLE payments ADD CONSTRAINT payments_status_chk CHECK "
+                    "(status IN ('DRAFT', 'PENDING', 'AUTHORIZED', 'CAPTURED', 'FAILED', 'REFUNDED'))"
+                )
         conn.commit()
 
 

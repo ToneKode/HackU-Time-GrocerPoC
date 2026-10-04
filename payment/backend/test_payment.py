@@ -184,3 +184,20 @@ def test_token_is_one_time(c):
     store.put(rec)
     bad = c.post("/payment/authorize", json={"payment_id": draft["payment_id"]})
     assert bad.status_code == 409
+
+
+def test_recommend_uses_agent_brain_rates(c):
+    """The draft estimate agrees with agent-brain benefits.py (Mox Mastercard 2.4%)."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent-brain" / "backend"))
+    from benefits import INSTRUMENTS
+
+    rate = next(row["cashback"] for row in INSTRUMENTS if row["route"] == "mastercard")
+    body = c.post("/payment/recommend", json={"amount": 499.3}).json()
+    card = next(row for row in body["options"] if row["rail"] == "mastercard")
+    assert card["cashback_rate"] == rate == 0.024
+    assert card["cashback"] == 11.98
+    union = next(row for row in body["options"] if row["rail"] == "unionpay")
+    assert union["cashback"] == 0.0  # agent-brain gives this rail no benefit

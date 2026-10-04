@@ -19,18 +19,21 @@ from typing import Literal
 
 import redis
 from pymysql.err import InterfaceError, OperationalError
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from audit_store import PostgresAuditLog, compute_hash
 from catalog_store import CatalogStore
+from market_store import MarketStore, MarketRules, QuoteLine
 from config import settings
+from dashboard_store import DashboardStore
 from db import apply_schema, ensure_database, ping as pg_ping
 from profile_store import AccountExists, BadPayment, NotFound, ProfileStore
 from redis_client import flush_escalations, make_redis
 from spend_store import SpendStore
+from settlement_verifier import fetch_payment, verified_settlement
 
 log = logging.getLogger("persistance")
 S = settings()
@@ -39,6 +42,8 @@ audit = PostgresAuditLog(S["database_url"])
 spend = SpendStore(S["database_url"])
 profile = ProfileStore(S["database_url"])
 catalog = CatalogStore(S["database_url"])
+market = MarketStore(S["database_url"])
+dashboards = DashboardStore(S["database_url"])
 redis_client = make_redis(S["redis_url"])
 USING_FAKEREDIS = S["redis_url"].startswith("fakeredis")
 
@@ -295,7 +300,7 @@ class SettleIn(BaseModel):
     currency: Literal["HKD"] = "HKD"
     merchant: str = ""
     payment_route: str = ""
-    payment_id: str | None = None
+    payment_id: str = Field(min_length=1, pattern=r"^pay_[A-Za-z0-9_-]+$")
     intent: str = ""
     lines: list[SettleLineIn] = Field(default_factory=list)
     settlement: dict | None = None
@@ -335,12 +340,15 @@ def login_account(body: LoginIn) -> dict:
     found = _profile_call(lambda: profile.authenticate(body.email, body.password))
     if found is None:
         raise HTTPException(401, "Email or password is wrong")
+    found["role"] = "admin" if found["email"].lower() in S["demo_admin_emails"] else "shopper"
     return found
 
 
 @app.get("/accounts/{account_id}/profile")
 def get_profile(account_id: str) -> dict:
-    return _profile_call(lambda: profile.profile(account_id))
+    found = _profile_call(lambda: profile.profile(account_id))
+    found["role"] = "admin" if found["email"].lower() in S["demo_admin_emails"] else "shopper"
+    return found
 
 
 @app.patch("/accounts/{account_id}/limits")
@@ -380,18 +388,20 @@ def patch_preferences(account_id: str, body: PreferencesIn) -> dict:
 
 @app.post("/accounts/{account_id}/orders/settle")
 def settle_order(account_id: str, body: SettleIn) -> dict:
+    payment = fetch_payment(S["payment_url"], body.payment_id)
     try:
+        authoritative = verified_settlement(payment, account_id, body.payment_id, body.amount, body.currency)
         saved = profile.record_paid(
             account_id,
             body.amount,
             currency=body.currency,
-            merchant=body.merchant,
-            payment_route=body.payment_route,
+            merchant=authoritative["merchant"],
+            payment_route=authoritative["payment_route"],
             payment_id=body.payment_id,
-            intent=body.intent,
-            lines=[line.model_dump() for line in body.lines],
-            settlement=body.settlement,
-            benefits=[item.model_dump() for item in body.benefits],
+            intent=payment.get("intent") or body.intent,
+            lines=authoritative.get("lines", [line.model_dump() for line in body.lines]),
+            settlement=authoritative,
+            benefits=authoritative["benefits"],
         )
     except NotFound:
         raise HTTPException(404, "Unknown account or order")
@@ -416,6 +426,12 @@ def list_orders(
     limit: int = Query(default=20, ge=1, le=50),
 ) -> list[dict]:
     return _profile_call(lambda: profile.list_orders(account_id, status=status, limit=limit))
+
+
+@app.get("/accounts/{account_id}/dashboard")
+def account_dashboard(account_id: str, recent: int = Query(default=20, ge=1, le=100)) -> dict:
+    """Order history, spend by category, lifetime spend and benefits for one shopper."""
+    return _profile_call(lambda: dashboards.dashboard(account_id, recent=recent))
 
 
 @app.get("/accounts/{account_id}/chat")
@@ -495,6 +511,15 @@ def catalog_products(
     )
 
 
+@app.get("/catalog/search")
+def catalog_search(
+    q: str = "", merchant: str = "", category: str = "",
+    limit: int = Query(default=40, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    return _profile_call(lambda: catalog.search_page(q, merchant, category, limit, offset))
+
+
 @app.get("/catalog/products/{sku}")
 def catalog_product(sku: str) -> dict:
     row = _profile_call(lambda: catalog.get(sku))
@@ -525,3 +550,64 @@ def hash_fields() -> dict:
         "contract_example_hash": compute_hash(sample),
         "escalation_owner": "backend-policy:8001",
     }
+
+
+class AdminRulesIn(BaseModel):
+    account_id: str = Field(min_length=1)
+    rules: MarketRules
+
+
+class AdminPriceIn(BaseModel):
+    account_id: str = Field(min_length=1)
+    price: float = Field(gt=0, allow_inf_nan=False, multiple_of=0.01)
+
+
+class MarketQuoteIn(BaseModel):
+    lines: list[QuoteLine] = Field(min_length=1, max_length=200)
+
+
+def require_admin(account_id: str, password: str | None):
+    actor = _profile_call(lambda: profile.profile(account_id))
+    if actor["email"].lower() not in S["demo_admin_emails"]:
+        raise HTTPException(403, "Market administration requires the demo admin role")
+    verified = _profile_call(lambda: profile.authenticate(actor["email"], password or ""))
+    if verified is None or verified["id"] != account_id:
+        raise HTTPException(401, "Admin account password required in X-Admin-Password")
+    return actor
+
+
+@app.get("/market/rules")
+def market_rules():
+    return _profile_call(market.get)
+
+
+@app.get("/admin/market/rules")
+def admin_market_rules(account_id: str, x_admin_password: str | None = Header(default=None)):
+    require_admin(account_id, x_admin_password)
+    return _profile_call(market.get)
+
+
+@app.put("/admin/market/rules")
+def admin_put_market_rules(body: AdminRulesIn, x_admin_password: str | None = Header(default=None)):
+    require_admin(body.account_id, x_admin_password)
+    try:
+        return _profile_call(lambda: market.put(body.rules.model_dump(), body.account_id))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/admin/catalog/{sku}")
+def admin_catalog_price(sku: str, body: AdminPriceIn, x_admin_password: str | None = Header(default=None)):
+    require_admin(body.account_id, x_admin_password)
+    result = _profile_call(lambda: catalog.update_price(sku, body.price))
+    if result is None:
+        raise HTTPException(404, "Unknown SKU")
+    return result
+
+
+@app.post("/market/quote")
+def market_quote(body: MarketQuoteIn):
+    try:
+        return _profile_call(lambda: market.quote([line.model_dump() for line in body.lines]))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

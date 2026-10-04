@@ -230,3 +230,31 @@ export async function getAuditLog() {
   await wait(80)
   return structuredClone(lastAuditLog)
 }
+
+export async function getAlternatives(body) {
+  return { sku: body?.sku || '', alternatives: [] }
+}
+
+// Mock mode only (VITE_USE_MOCK=true): empty dashboard, no invented numbers.
+export async function getDashboard(accountId) {
+  return {
+    account_id: accountId, lifetime_spent: 0, orders_paid: 0, average_order: 0, goods_total: 0, fees_and_offers: 0,
+    categories: [], orders: [], monthly: [], orders_by_status: {},
+    benefits: { totals: { cash: 0, asiamiles: 0, membership_points: 0, loyalty_points: 0 }, by_method: [], entries: 0 },
+  }
+}
+
+export async function getPolicyStats(accountId) {
+  return {
+    account_id: accountId, checks: 0, runs_checked: 0, runs_failed: 0, runs_halted: 0, runs_escalated: 0, runs_passed: 0,
+    by_rule: [], recent_failures: [], escalations: { count: 0, by_status: {}, recent: [] },
+  }
+}
+
+export function recoverPayment(body) {
+  return authorizePayment(body)
+}
+
+export async function recoverOrders() {
+  return { recovered: [], pending: [] }
+}

@@ -35,6 +35,7 @@ Tests still force fakeredis + a temp JSONL file via `conftest.py`.
 | GET | `/escalations/{id}` | Person 1, Person 3 (poll 1 s) | PENDING / APPROVED / REFUSED / EXPIRED, `remaining_seconds` |
 | POST | `/escalations/{id}/decision` | Person 3 | `{decision: APPROVE\|REFUSE}`. Always 200 with the Escalation; extra `decision_applied`, and `late_decision_ignored` after expiry |
 | GET | `/rules` | Person 3 | Active caps and lists for the dashboard |
+| GET | `/policy_stats/{account_id}` | Person 3 (dashboard) | Per-shopper failures: `runs_checked`, `runs_failed`, `runs_halted`, `runs_escalated`, `by_rule[{rule,status,count,examples}]`, `recent_failures`, `escalations`, plus a global `ledger` summary. Built from verdicts recorded when `/check_policy` or `/create_escalation` carry `account_id` (optional `run_id`, `stage`). Store: MySQL `policy_decisions` with `DATABASE_URL`, else `data/decisions.jsonl` (`DECISIONS_PATH`). |
 | POST | `/demo/tamper/{i}`, `/demo/reset` | demo only | need `DEMO_MODE=true` |
 
 ## Rules (first hit wins)

@@ -161,6 +161,7 @@ class PolicyClient:
         monthly_cap: float | None = None,
         per_transaction_cap: float | None = None,
         bulk_ceiling: float | None = None,
+        tags: dict | None = None,
     ) -> dict:
         payload = {
             "merchant": merchant,
@@ -177,6 +178,10 @@ class PolicyClient:
             payload["per_transaction_cap"] = per_transaction_cap
         if bulk_ceiling is not None:
             payload["bulk_ceiling"] = bulk_ceiling
+        # account_id / run_id / stage let :8001 record the verdict per shopper.
+        for key in ("account_id", "run_id", "stage"):
+            if (tags or {}).get(key):
+                payload[key] = str(tags[key])[:64]
         remote = self._post("/check_policy", payload)
         local = decide(
             merchant,
@@ -200,6 +205,7 @@ class PolicyClient:
         monthly_cap: float | None = None,
         per_transaction_cap: float | None = None,
         bulk_ceiling: float | None = None,
+        tags: dict | None = None,
     ) -> tuple[dict, list[dict]]:
         """Judge every line, then the landed total. Each call becomes one audit row."""
         caps = {
@@ -207,6 +213,8 @@ class PolicyClient:
             "per_transaction_cap": per_transaction_cap,
             "bulk_ceiling": bulk_ceiling,
         }
+        if tags:
+            caps["tags"] = tags
         events = []
         halted = None
         for index, line in enumerate(lines, start=1):
@@ -243,7 +251,14 @@ class PolicyClient:
         events.append(_policy_event(f"basket landed {landed}: {total['reason']}", total))
         return total, events
 
-    def create_escalation(self, draft: dict) -> dict:
+    def create_escalation(
+        self, draft: dict, *, account_id: str | None = None,
+        run_id: str | None = None, order_id: str | None = None,
+    ) -> dict:
+        draft = dict(draft)
+        for key, value in (("account_id", account_id), ("run_id", run_id), ("order_id", order_id)):
+            if value is not None:
+                draft[key] = value
         escalation_id = "esc_" + uuid.uuid4().hex[:8]
         expires = datetime.now(timezone.utc) + timedelta(seconds=TTL_SECONDS)
         record = {
@@ -268,6 +283,9 @@ class PolicyClient:
         for key in ("monthly_cap", "per_transaction_cap", "bulk_ceiling"):
             if draft.get(key) is not None:
                 payload[key] = draft[key]
+        for key in ("account_id", "run_id", "order_id"):
+            if draft.get(key):
+                payload[key] = str(draft[key])[:64]
         remote = self._post("/create_escalation", payload)
         if remote and remote.get("escalation_id"):
             record["escalation_id"] = remote["escalation_id"]
@@ -290,8 +308,8 @@ class PolicyClient:
             self.memory[escalation_id].update(record)
         return record
 
-    def log_event(self, event: str, status: str, reason: str) -> None:
-        self._post("/log_event", {"event": event, "status": status, "reason": reason})
+    def log_event(self, event: str, status: str, reason: str) -> dict | None:
+        return self._post("/log_event", {"event": event, "status": status, "reason": reason})
 
     def _refresh_ttl(self, record: dict) -> None:
         raw = record.get("_expires_at") or record.get("expires_at")
@@ -403,6 +421,28 @@ class ProfileClient:
         body = self._request("GET", f"/accounts/{account_id}/profile")
         return body if isinstance(body, dict) else None
 
+    def search_catalog(self, q: str = "", category: str = "", merchant: str = "", limit: int = 40, offset: int = 0) -> dict:
+        response = self.http.get("/catalog/search", params={"q": q, "category": category,
+                                 "merchant": merchant, "limit": limit, "offset": offset}, timeout=15.0)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("products"), list):
+            raise ValueError("Catalog search returned invalid data")
+        return body
+
+    def market_rules(self) -> dict:
+        """Fetch live rules without falling back to demo discounts on failure."""
+        from benefits import validate_rules
+
+        response = self.http.get("/market/rules", timeout=15.0)
+        response.raise_for_status()
+        return validate_rules(response.json())
+
+    def catalog_categories(self) -> list[dict]:
+        response = self.http.get("/catalog/categories", timeout=15.0)
+        response.raise_for_status()
+        return response.json()
+
     def open_order(self, account_id: str, intent: str) -> str | None:
         body = self._request("POST", "/orders", {"account_id": account_id, "intent": intent})
         if not isinstance(body, dict):
@@ -413,6 +453,11 @@ class ProfileClient:
         body = self._request("POST", f"/orders/{order_id}/checkpoint", fields)
         return body if isinstance(body, dict) else None
 
+    def settle(self, account_id: str, body: dict) -> dict | None:
+        """Record a captured payment as a paid order (idempotent on payment_id)."""
+        result = self._request("POST", f"/accounts/{account_id}/orders/settle", body, timeout=15.0)
+        return result if isinstance(result, dict) else None
+
     def append_chat(self, account_id: str, role: str, content: str, order_id: str | None = None) -> None:
         if not content:
             return
@@ -422,13 +467,13 @@ class ProfileClient:
             {"role": role, "content": content, "order_id": order_id},
         )
 
-    def _request(self, method: str, path: str, payload: dict | None = None) -> Any:
+    def _request(self, method: str, path: str, payload: dict | None = None, *, timeout: float | None = None) -> Any:
         if self.offline:
             return None
         try:
-            response = self.http.request(method, path, json=payload)
+            options = {"timeout": timeout} if timeout is not None else {}
+            response = self.http.request(method, path, json=payload, **options)
         except httpx.HTTPError:
-            self.offline = True
             return None
         if response.status_code == 404:
             return None
@@ -441,7 +486,7 @@ class ProfileClient:
 
 
 class PaymentClient:
-    """Payment service on :8004. A missed call returns None so the mall can still settle."""
+    """Payment service on :8004. Unknown results must be recovered by payment ID."""
 
     def __init__(
         self,
@@ -478,6 +523,29 @@ class PaymentClient:
             },
         )
 
+    def draft_basket(self, *, account_id: str, intent: str, groups: list[dict],
+                     rules_version: int | None = None, trusted_draft_id: str | None = None) -> dict | None:
+        payload = {
+            "account_id": account_id, "intent": intent,
+            "groups": [{"merchant": group["merchant"], "amount": group["payment"]["amount"],
+                        "rail": group["payment"]["route"]} for group in groups],
+        }
+        if rules_version is not None:
+            if type(rules_version) is not int or rules_version < 0:
+                raise ValueError("rules_version must be a nonnegative integer")
+            payload["rules_version"] = rules_version
+        if trusted_draft_id is not None:
+            if not isinstance(trusted_draft_id, str) or not trusted_draft_id.strip():
+                raise ValueError("trusted_draft_id must be a nonempty string")
+            payload["trusted_draft_id"] = trusted_draft_id
+        return self._request("POST", "/payment/basket/draft", payload)
+
+    def get_payment(self, payment_id: str) -> dict | None:
+        return self._request("GET", f"/payment/{payment_id}", None)
+
+    def recover(self, payment_id: str) -> dict | None:
+        return self._request("POST", f"/payment/{payment_id}/recover", None)
+
     def authorize(
         self,
         payment_id: str,
@@ -500,7 +568,6 @@ class PaymentClient:
         try:
             response = self.http.request(method, path, json=payload)
         except httpx.HTTPError:
-            self.offline = True
             return None
         if response.status_code >= 400:
             return None

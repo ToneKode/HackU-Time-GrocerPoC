@@ -356,6 +356,10 @@ class ProfileStore:
         )
         with connect(self.database_url) as conn:
             with conn.cursor() as cur:
+                # Serialize reward and spend writes for settlement retries.
+                cur.execute("SELECT id FROM accounts WHERE id = %s FOR UPDATE", (account_id,))
+                if cur.fetchone() is None:
+                    raise NotFound(account_id)
                 if key:
                     cur.execute(
                         """
