@@ -2,6 +2,9 @@
 
 hash = sha256("index|ts|event|status|reason|prev_hash")   (cross_team_config.json -> audit)
 `thought` is stored for the UI trace but is NOT part of the hash, per that contract.
+
+Default backend is a JSONL file. Set DATABASE_URL to use the Postgres store from
+`persistance/backend` (same hash contract, survives restarts).
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 GENESIS = "0" * 64
 HASH_FIELDS = ("index", "ts", "event", "status", "reason", "prev_hash")
@@ -21,6 +25,32 @@ def now_ts() -> str:
 
 def compute_hash(e: dict) -> str:
     return hashlib.sha256("|".join(str(e[k]) for k in HASH_FIELDS).encode("utf-8")).hexdigest()
+
+
+def make_audit_log(database_url: str | None, ledger_path: str):
+    """File ledger by default; Postgres when DATABASE_URL is set (persistance)."""
+    if database_url:
+        import sys
+
+        root = Path(__file__).resolve().parents[1] / "persistance" / "backend"
+        # Load sibling modules under a private package name so we don't shadow
+        # backend-policy's own `config` / `db` if those ever exist.
+        pkg = "tg_persistance_backend"
+        if pkg not in sys.modules:
+            import types
+
+            package = types.ModuleType(pkg)
+            package.__path__ = [str(root)]  # type: ignore[attr-defined]
+            sys.modules[pkg] = package
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+
+        from audit_store import PostgresAuditLog
+        from db import apply_schema
+
+        apply_schema(database_url, root / "schema.sql")
+        return PostgresAuditLog(database_url)
+    return AuditLog(ledger_path)
 
 
 class AuditLog:

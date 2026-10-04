@@ -16,6 +16,7 @@ const router = useRouter()
 const form = reactive({ name: '', email: '', phone: '', password: '', terms: false, marketing: false })
 const submitted = ref(false)
 const busy = ref(false)
+const formError = ref('')
 
 const strength = computed(() => passwordStrength(form.password))
 const strengthKey = computed(() => ['', 'weak', 'fair', 'strong'][strength.value])
@@ -31,6 +32,7 @@ const show = (field) => submitted.value && errors.value[field]
 
 async function submit() {
   submitted.value = true
+  formError.value = ''
   if (Object.values(errors.value).some(Boolean)) return
   busy.value = true
   try {
@@ -42,6 +44,8 @@ async function submit() {
       marketing: form.marketing,
     })
     router.push(route.query.redirect || '/')
+  } catch (error) {
+    formError.value = error.status === 409 ? t('auth.errors.emailTaken') : t('auth.errors.unavailable')
   } finally {
     busy.value = false
   }
@@ -135,6 +139,8 @@ async function submit() {
         <input v-model="form.marketing" type="checkbox" />
         <span>{{ $t('auth.marketing') }}</span>
       </label>
+
+      <p v-if="formError" class="auth-error" role="alert">{{ formError }}</p>
 
       <button type="submit" class="btn-primary auth-submit" :disabled="busy">
         <Icon :icon="UserAdd01Icon" :size="18" /> {{ busy ? $t('auth.registering') : $t('auth.register') }}

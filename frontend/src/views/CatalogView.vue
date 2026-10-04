@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { products, categories, categoryById } from '../data/catalog.js'
+import { shelfState } from '../data/loadShelf.js'
 import { bestOffer, discountPct } from '../lib/pricing.js'
 import ProductCard from '../components/shop/ProductCard.vue'
 import MerchantChips from '../components/shop/MerchantChips.vue'
@@ -20,9 +21,11 @@ const sort = ref('popular')
 const category = computed(() => route.query.category ?? null)
 const q = computed(() => (route.query.q ?? '').toString().trim().toLowerCase())
 
-const countByCategory = Object.fromEntries(
+const countByCategory = computed(() => Object.fromEntries(
   categories.map((c) => [c.id, products.filter((p) => p.category === c.id).length]),
-)
+))
+const shown = ref(48)
+watch([category, q, merchant, sort], () => { shown.value = 48 })
 
 function setCategory(id) {
   router.replace({ query: { ...route.query, category: id ?? undefined } })
@@ -46,6 +49,8 @@ const results = computed(() => {
   if (sort.value === 'discount') list.sort((a, b) => discountPct(bestOffer(b, allowed)) - discountPct(bestOffer(a, allowed)))
   return list
 })
+
+const visible = computed(() => results.value.slice(0, shown.value))
 
 const title = computed(() => (categoryById[category.value] ? categoryLabel(category.value) : t('catalog.allProducts')))
 </script>
@@ -74,6 +79,7 @@ const title = computed(() => (categoryById[category.value] ? categoryLabel(categ
 
       <div class="section-head">
         <h2>{{ title }} <span class="muted">({{ results.length }})</span></h2>
+        <p v-if="shelfState.source === 'database'" class="muted shelf-note">{{ $t('catalog.fromDatabase', { n: shelfState.count }) }}</p>
         <select v-model="sort" class="sort" :aria-label="$t('catalog.sortLabel')">
           <option value="popular">{{ $t('catalog.popular') }}</option>
           <option value="cheap">{{ $t('catalog.cheap') }}</option>
@@ -88,7 +94,12 @@ const title = computed(() => (categoryById[category.value] ? categoryLabel(categ
       </p>
 
       <div class="product-grid">
-        <ProductCard v-for="p in results" :key="p.id" :product="p" :merchant="merchant" />
+        <ProductCard v-for="p in visible" :key="p.id" :product="p" :merchant="merchant" />
+      </div>
+      <div v-if="results.length > visible.length" class="catalog-more">
+        <button type="button" class="btn-soft" @click="shown += 48">
+          {{ $t('catalog.showMore') }} ({{ visible.length }} / {{ results.length }})
+        </button>
       </div>
 
       <div v-if="!results.length" class="empty-box">

@@ -30,6 +30,12 @@ const deals = computed(() => {
     .sort((a, b) => b.pct - a.pct)
     .map((d) => d.product)
 })
+
+const spotlight = computed(() => {
+  if (deals.value.length) return deals.value
+  const allowed = merchant.value ? [merchant.value] : null
+  return products.filter((product) => bestOffer(product, allowed)).slice(0, 8)
+})
 </script>
 
 <template>
@@ -62,13 +68,13 @@ const deals = computed(() => {
 
     <section>
       <div class="section-head">
-        <h2><Icon :icon="FlashIcon" :size="22" class="title-icon" /> {{ $t('home.megaDeals') }} <span class="muted">({{ deals.length }})</span></h2>
+        <h2><Icon :icon="FlashIcon" :size="22" class="title-icon" /> {{ deals.length ? $t('home.megaDeals') : $t('catalog.allProducts') }} <span class="muted">({{ spotlight.length }})</span></h2>
       </div>
       <MerchantChips v-model="merchant" />
       <div class="product-grid">
-        <ProductCard v-for="p in deals" :key="p.id" :product="p" :merchant="merchant" />
+        <ProductCard v-for="p in spotlight" :key="p.id" :product="p" :merchant="merchant" />
       </div>
-      <p v-if="!deals.length" class="empty-note">{{ $t('home.noDeals') }}</p>
+      <p v-if="!spotlight.length" class="empty-note">{{ $t('home.noDeals') }}</p>
     </section>
   </main>
 </template>

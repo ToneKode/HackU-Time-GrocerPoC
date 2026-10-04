@@ -7,6 +7,7 @@ import {
   BroccoliIcon, MilkBottleIcon, RiceBowl01Icon, CookieIcon, SoftDrink01Icon,
   TissuePaperIcon, ShampooIcon, BabyBottleIcon, MedicineBottle01Icon,
 } from '@hugeicons/core-free-icons'
+import { reactive } from 'vue'
 
 // Category tints and store colours are CSS vars (shop.css) so charts and logos share one validated palette.
 export const merchants = [
@@ -16,7 +17,7 @@ export const merchants = [
   { name: 'Japan Home Centre', short: 'J', color: 'var(--m-4)' },
 ]
 
-export const categories = [
+export const categories = reactive([
   { id: 'fruit-veg', label: 'Fruit & veg', icon: BroccoliIcon, tint: 'var(--tint-fruit-veg)' },
   { id: 'dairy', label: 'Dairy & eggs', icon: MilkBottleIcon, tint: 'var(--tint-dairy)' },
   { id: 'pantry', label: 'Pantry', icon: RiceBowl01Icon, tint: 'var(--tint-pantry)' },
@@ -26,9 +27,9 @@ export const categories = [
   { id: 'personal', label: 'Personal care', icon: ShampooIcon, tint: 'var(--tint-personal)' },
   { id: 'baby', label: 'Baby', icon: BabyBottleIcon, tint: 'var(--tint-baby)' },
   { id: 'health', label: 'Health', icon: MedicineBottle01Icon, tint: 'var(--tint-health)' },
-]
+])
 
-export const products = [
+export const products = reactive([
   {
     id: 'SKU001', name: 'Tempo Ultra Soft Toilet Paper 27 Rolls', category: 'household', size: '27 rolls', emoji: '🧻',
     offers: [
@@ -232,8 +233,8 @@ export const products = [
       { merchant: 'Watsons', price: 98.0, oldPrice: 138.0 },
     ],
   },
-]
+])
 
-export const productById = Object.fromEntries(products.map((p) => [p.id, p]))
+export const productById = reactive(Object.fromEntries(products.map((p) => [p.id, p])))
 export const merchantByName = Object.fromEntries(merchants.map((m) => [m.name, m]))
-export const categoryById = Object.fromEntries(categories.map((c) => [c.id, c]))
+export const categoryById = reactive(Object.fromEntries(categories.map((c) => [c.id, c])))

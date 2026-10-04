@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shopping agent LangGraph</title>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, flowchart: { htmlLabels: true, curve: "basis" } });
+  </script>
+  <style>
+    body { margin: 0; font-family: Georgia, serif; background: #f4f1ea; color: #1c1915; }
+    main { max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-weight: 600; letter-spacing: -0.03em; margin-bottom: 0; }
+    .lede { max-width: 46rem; line-height: 1.45; }
+    .mermaid { background: white; border: 1px solid #d9d3c7; padding: 12px; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; background: white; font-family: Consolas, monospace; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e4ddd0; text-align: left; padding: 8px; vertical-align: top; }
+    th { font-family: Georgia, serif; }
+    .path { font-family: Consolas, monospace; font-size: 13px; line-height: 1.5; }
+    .swatch { display: inline-block; width: 0.8em; height: 0.8em; margin-right: 0.3em; vertical-align: -0.05em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Shopping agent LangGraph</h1>
+  <p class="lede">Person 1. Reason, then a fixed plan, then the tool calls. The blue nodes are the log. A log entry is hashed before the next edge runs. Tool bodies are not implemented, so every row says the tool was not called. The branch labels are the rules.</p>
+  <p>
+    <span class="swatch" style="background:#1b4332"></span>step
+    <span class="swatch" style="background:#143d66"></span>audit log
+    <span class="swatch" style="background:#9b2226"></span>branch
+  </p>
+  <pre class="mermaid">flowchart TD
+  start([Mother sends an intent])
+  finish([ActionPlan])
+  start --> route_entry
+  route_entry -->|new intent| reason
+  route_entry -->|escalation APPROVED| execute_payment
+  reason -->|log INTENT_RECEIVED| audit_intent
+  audit_intent -->|parsed| plan
+  plan -->|log PLAN| audit_plan
+  audit_plan -->|fixed tool order| search_products
+  search_products -->|log SEARCH| audit_search
+  audit_search -->|first product| price_cart
+  price_cart -->|log CART_PRICED| audit_cart
+  audit_cart -->|amount = total_landed_cost| check_budget
+  check_budget -->|log POLICY_CHECK| audit_policy
+  audit_policy -->|PASS at or under 500| execute_payment
+  audit_policy -->|ESCALATE 500 to 800| create_escalation
+  audit_policy -->|HALT| halt
+  execute_payment -->|log PAYMENT| audit_payment
+  audit_payment -->|plan closes| finish
+  create_escalation -->|log ESCALATION_CREATED| audit_escalation
+  audit_escalation -->|ESCALATED, request returns| finish
+  halt -->|log HALTED| audit_halt
+  audit_halt -->|do not pay| finish
+  classDef audit fill:#143d66,stroke:#8ecae6,color:#f8f9fa
+  classDef step fill:#1b4332,stroke:#95d5b2,color:#f8f9fa
+  classDef gate fill:#9b2226,stroke:#ffb4a2,color:#ffffff
+  class audit_intent,audit_plan,audit_search,audit_cart,audit_payment,audit_escalation,audit_halt audit
+  class reason,plan,search_products,price_cart,check_budget,execute_payment,create_escalation,halt step
+  class route_entry,audit_policy gate
+</pre>
+  <h2>happy_path</h2><p>Expected plan status once the tools exist: <strong>COMPLETED</strong></p><p class="path">route_entry → reason → audit_intent → plan → audit_plan → search_products → audit_search → price_cart → audit_cart → check_budget → audit_policy → execute_payment → audit_payment</p><table><thead><tr><th>#</th><th>Event</th><th>Status</th><th>Reason</th><th>Hash</th><th>Tool called</th></tr></thead><tbody><tr><td>0</td><td>INTENT_RECEIVED</td><td>PARSED</td><td>Model may decide query and qty only</td><td><code>7c522f3b39ee</code></td><td>no</td></tr><tr><td>1</td><td>PLAN</td><td>FIXED_ORDER</td><td>search_products, price_cart, check_budget, then the policy branch</td><td><code>6a85b6e9cad0</code></td><td>no</td></tr><tr><td>2</td><td>SEARCH</td><td>RECORDED</td><td>First product in response order. Product name is untrusted.</td><td><code>accf43176099</code></td><td>no</td></tr><tr><td>3</td><td>CART_PRICED</td><td>RECORDED</td><td>Later nodes use total_landed_cost, not the shelf price.</td><td><code>66bb3534911c</code></td><td>no</td></tr><tr><td>4</td><td>POLICY_CHECK</td><td>PASS</td><td>Under HK$500 cap</td><td><code>785b27bf6dd6</code></td><td>no</td></tr><tr><td>5</td><td>PAYMENT</td><td>RECORDED</td><td>Payment tool body is not implemented. The call is recorded.</td><td><code>2f686fb27116</code></td><td>no</td></tr></tbody></table><h2>halted_monthly</h2><p>Expected plan status once the tools exist: <strong>HALTED</strong></p><p class="path">route_entry → reason → audit_intent → plan → audit_plan → search_products → audit_search → price_cart → audit_cart → check_budget → audit_policy → halt → audit_halt</p><table><thead><tr><th>#</th><th>Event</th><th>Status</th><th>Reason</th><th>Hash</th><th>Tool called</th></tr></thead><tbody><tr><td>0</td><td>INTENT_RECEIVED</td><td>PARSED</td><td>Model may decide query and qty only</td><td><code>7c522f3b39ee</code></td><td>no</td></tr><tr><td>1</td><td>PLAN</td><td>FIXED_ORDER</td><td>search_products, price_cart, check_budget, then the policy branch</td><td><code>6a85b6e9cad0</code></td><td>no</td></tr><tr><td>2</td><td>SEARCH</td><td>RECORDED</td><td>First product in response order. Product name is untrusted.</td><td><code>accf43176099</code></td><td>no</td></tr><tr><td>3</td><td>CART_PRICED</td><td>RECORDED</td><td>Later nodes use total_landed_cost, not the shelf price.</td><td><code>66bb3534911c</code></td><td>no</td></tr><tr><td>4</td><td>POLICY_CHECK</td><td>HALT</td><td>Over HK$2000 monthly cap</td><td><code>b9486f53cc46</code></td><td>no</td></tr><tr><td>5</td><td>HALTED</td><td>HALTED</td><td>Over HK$2000 monthly cap</td><td><code>caf85dbaee04</code></td><td>no</td></tr></tbody></table><h2>escalation_bulk</h2><p>Expected plan status once the tools exist: <strong>ESCALATED</strong></p><p class="path">route_entry → reason → audit_intent → plan → audit_plan → search_products → audit_search → price_cart → audit_cart → check_budget → audit_policy → create_escalation → audit_escalation</p><table><thead><tr><th>#</th><th>Event</th><th>Status</th><th>Reason</th><th>Hash</th><th>Tool called</th></tr></thead><tbody><tr><td>0</td><td>INTENT_RECEIVED</td><td>PARSED</td><td>Model may decide query and qty only</td><td><code>7c522f3b39ee</code></td><td>no</td></tr><tr><td>1</td><td>PLAN</td><td>FIXED_ORDER</td><td>search_products, price_cart, check_budget, then the policy branch</td><td><code>6a85b6e9cad0</code></td><td>no</td></tr><tr><td>2</td><td>SEARCH</td><td>RECORDED</td><td>First product in response order. Product name is untrusted.</td><td><code>accf43176099</code></td><td>no</td></tr><tr><td>3</td><td>CART_PRICED</td><td>RECORDED</td><td>Later nodes use total_landed_cost, not the shelf price.</td><td><code>66bb3534911c</code></td><td>no</td></tr><tr><td>4</td><td>POLICY_CHECK</td><td>ESCALATE</td><td>Over HK$500 per-transaction cap</td><td><code>4c19f31b6848</code></td><td>no</td></tr><tr><td>5</td><td>ESCALATION_CREATED</td><td>PENDING</td><td>Over HK$500 per-transaction cap</td><td><code>c1741965cb16</code></td><td>no</td></tr></tbody></table><h2>resume_approved</h2><p>Expected plan status once the tools exist: <strong>COMPLETED</strong></p><p class="path">route_entry → execute_payment → audit_payment</p><table><thead><tr><th>#</th><th>Event</th><th>Status</th><th>Reason</th><th>Hash</th><th>Tool called</th></tr></thead><tbody><tr><td>0</td><td>PAYMENT</td><td>RECORDED</td><td>Payment tool body is not implemented. The call is recorded.</td><td><code>361f14ed1b66</code></td><td>no</td></tr></tbody></table>
+</main>
+</body>
+</html>

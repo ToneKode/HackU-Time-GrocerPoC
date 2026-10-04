@@ -9,12 +9,25 @@ cd backend-policy && pip install -r requirements.txt
 py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8001
 pytest -q
 ```
-This demo does not connect to Postgres or Redis. Escalations stay in in-process fakeredis, and the ledger is `data/ledger.jsonl`. A `REDIS_URL` that points at a real server is ignored.
+
+By default, if `DATABASE_URL` / `REDIS_URL` are unset, this service probes
+the host Postgres on `127.0.0.1:2000` (and Redis on `:6379`) and uses them when
+reachable; otherwise it keeps JSONL + in-process fakeredis.
+
+```bash
+cd persistance && ./start-stores.sh
+# optional explicit exports:
+export DATABASE_URL=postgresql://tg:tg@127.0.0.1:2000/time_grocer
+export REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+See `persistance/README.md`. Escalation HTTP stays on this service (:8001).
+Tests still force fakeredis + a temp JSONL file via `conftest.py`.
 
 ## Endpoints
 | Method | Path | Who calls it | Notes |
 |---|---|---|---|
-| POST | `/check_policy` | Person 1 (`check_budget`) | `{merchant, category, amount, currency, sku, qty, monthly_spent}` (`category` must be non-empty) -> PolicyResult (+ extra `rule`) |
+| POST | `/check_policy` | Person 1 (`check_budget`) | Same body as before, plus optional `monthly_cap`, `per_transaction_cap`, `bulk_ceiling` from the shopper profile. Omitted caps stay 2000 / 500 / 800. |
 | POST | `/log_event` | Person 1 | `{event, status, reason, thought?}` -> LogEntry. `thought` is shown in the UI but not hashed |
 | GET | `/audit_log` | Person 3 | AuditEntry[] ascending by index |
 | GET | `/audit_log/verify` | Person 3 | `{valid, broken_at, reason}`; re-reads the file, so edits are detected |
@@ -22,6 +35,7 @@ This demo does not connect to Postgres or Redis. Escalations stay in in-process 
 | GET | `/escalations/{id}` | Person 1, Person 3 (poll 1 s) | PENDING / APPROVED / REFUSED / EXPIRED, `remaining_seconds` |
 | POST | `/escalations/{id}/decision` | Person 3 | `{decision: APPROVE\|REFUSE}`. Always 200 with the Escalation; extra `decision_applied`, and `late_decision_ignored` after expiry |
 | GET | `/rules` | Person 3 | Active caps and lists for the dashboard |
+| GET | `/policy_stats/{account_id}` | Person 3 (dashboard) | Per-shopper failures: `runs_checked`, `runs_failed`, `runs_halted`, `runs_escalated`, `by_rule[{rule,status,count,examples}]`, `recent_failures`, `escalations`, plus a global `ledger` summary. Built from verdicts recorded when `/check_policy` or `/create_escalation` carry `account_id` (optional `run_id`, `stage`). Store: MySQL `policy_decisions` with `DATABASE_URL`, else `data/decisions.jsonl` (`DECISIONS_PATH`). |
 | POST | `/demo/tamper/{i}`, `/demo/reset` | demo only | need `DEMO_MODE=true` |
 
 ## Rules (first hit wins)

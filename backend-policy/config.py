@@ -2,13 +2,18 @@
 
 Numbers, merchants and the check order mirror agent-brain/cross_team_config.json.
 test_policy.py::test_rules_match_cross_team_config fails if they drift apart.
+
+When DATABASE_URL / REDIS_URL are unset, we probe the persistance compose defaults
+and use them if reachable; otherwise we keep the zero-dep JSONL + fakeredis demo.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+log = logging.getLogger("policy.config")
 
 # Load backend-policy/.env if python-dotenv is installed. Real environment variables win.
 try:
@@ -38,20 +43,71 @@ REASONS = {
     "HALT_CATEGORY": "Category blacklisted",
 }
 
+# The shop database is MySQL on port 3306. Compose still publishes a Postgres
+# container on 5432; the app does not use that unless DATABASE_URL says so.
+PERSISTANCE_DATABASE_URL = "mysql://tg:tg@127.0.0.1:3306/time_grocer"
+PERSISTANCE_REDIS_URL = "redis://127.0.0.1:6379/0"
+
 
 def env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _db_reachable(url: str) -> bool:
+    if not url.startswith("mysql"):
+        return False
+    try:
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "persistance" / "backend"
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from db import ping
+
+        return ping(url)
+    except Exception:
+        return False
+
+
+def _redis_reachable(url: str) -> bool:
+    try:
+        import redis
+        return bool(redis.Redis.from_url(url, socket_connect_timeout=1).ping())
+    except Exception:
+        return False
+
+
 def _ledger_path() -> str:
     path = env("LEDGER_PATH", "data/ledger.jsonl")
-    return path if os.path.isabs(path) else str(BASE_DIR / path)    # same file whatever the cwd is
+    return path if os.path.isabs(path) else str(BASE_DIR / path)
+
+
+def _decisions_path() -> str:
+    path = env("DECISIONS_PATH", "")
+    if not path:
+        return str(Path(_ledger_path()).with_name("decisions.jsonl"))
+    return path if os.path.isabs(path) else str(BASE_DIR / path)
 
 
 def _redis_url() -> str:
-    # No Postgres and no Redis server. Anything else falls back to in-process fakeredis.
-    chosen = env("REDIS_URL", "fakeredis://")
-    return chosen if chosen.startswith("fakeredis") else "fakeredis://"
+    # Explicit REDIS_URL always wins (tests set fakeredis://).
+    if "REDIS_URL" in os.environ:
+        return os.environ["REDIS_URL"] or "fakeredis://"
+    if _redis_reachable(PERSISTANCE_REDIS_URL):
+        log.info("Auto-detected persistance Redis at %s", PERSISTANCE_REDIS_URL)
+        return PERSISTANCE_REDIS_URL
+    return "fakeredis://"
+
+
+def _database_url() -> str | None:
+    if "DATABASE_URL" in os.environ:
+        url = os.environ["DATABASE_URL"].strip()
+        return url or None
+    if _db_reachable(PERSISTANCE_DATABASE_URL):
+        log.info("Auto-detected shop MySQL at %s", PERSISTANCE_DATABASE_URL.split("@")[-1])
+        return PERSISTANCE_DATABASE_URL
+    return None
 
 
 def settings() -> dict:
@@ -59,7 +115,9 @@ def settings() -> dict:
         "port": int(env("POLICY_API_PORT", "8001")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),
         "redis_url": _redis_url(),
+        "database_url": _database_url(),
         "ledger_path": _ledger_path(),
+        "decisions_path": _decisions_path(),
         "ttl": int(env("ESCALATION_TTL_SECONDS", "600")),
         "signing_secret": env("APPROVAL_SIGNING_SECRET", "dev-secret-change-me"),
         "require_signature": env("REQUIRE_SIGNATURE", "false").lower() == "true",

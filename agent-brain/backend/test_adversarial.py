@@ -107,8 +107,8 @@ def test_user_stated_maximum_is_enforced_after_shipping() -> None:
 
 def test_policy_amount_mismatch_fails_closed_before_charge() -> None:
     class MismatchedPolicy(PolicyClient):
-        def check(self, merchant, category, amount, monthly_spent, sku="", qty=1):
-            result = super().check(merchant, category, amount, monthly_spent, sku, qty)
+        def check(self, merchant, category, amount, monthly_spent, sku="", qty=1, **kwargs):
+            result = super().check(merchant, category, amount, monthly_spent, sku, qty, **kwargs)
             result["amount"] = amount + 10
             return result
 
@@ -129,15 +129,22 @@ def test_overcharged_success_response_is_reported_as_failed() -> None:
             result["charged"] = round(cart_total + 1, 2)
             return result
 
-    body = _api(mall=OverchargingMall()).post(
-        "/agent/intent",
-        json={"intent": "cheap toilet paper"},
+    api = _api(mall=OverchargingMall())
+    body = api.post("/agent/intent", json={"intent": "cheap toilet paper"}).json()
+    assert body["status"] == "READY"
+    assert body["payment"] is None
+    confirmed = api.post(
+        "/agent/basket/confirm",
+        json={"intent": "cheap toilet paper", "lines": [{"sku": "SKU001", "qty": 1}]},
     ).json()
-    assert body["status"] == "FAILED"
-    assert body["payment"]["success"] is True
-    assert body["payment"]["charged"] == 60.9
-    assert "authorized HK$59.90" in body["reply"]
-    assert "HK$60.90" in body["reply"]
+    assert confirmed["payment"] is None
+    paid = api.post(
+        "/agent/basket/approve",
+        json={"amount": confirmed["settlement"]["total"], "payment_route": "mastercard", "merchant": "Watsons"},
+    ).json()
+    assert paid["success"] is False
+    assert "authorized HK$59.90" in paid["error"]
+    assert "HK$60.90" in paid["error"]
 
 
 def test_cart_price_different_from_catalogue_is_not_paid() -> None:
@@ -335,5 +342,5 @@ def test_replay_harness_replays_intents_against_the_agent_api() -> None:
     assert report["total_runs"] == 2
     assert report["overspend_runs"] == 0
     assert report["inconclusive_runs"] == 0
-    assert report["plan_status_counts"] == {"COMPLETED": 1, "READY": 1}
-    assert [run["plan_status"] for run in report["runs"]] == ["COMPLETED", "READY"]
+    assert report["plan_status_counts"] == {"READY": 2}
+    assert [run["plan_status"] for run in report["runs"]] == ["READY", "READY"]

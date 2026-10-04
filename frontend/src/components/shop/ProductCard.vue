@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { categoryById } from '../../data/catalog.js'
 import { sortedOffers, bestOffer, discountPct } from '../../lib/pricing.js'
 import { money } from '../../lib/format.js'
@@ -21,6 +21,7 @@ const best = computed(() => bestOffer(props.product, allowed.value))
 const offers = computed(() => sortedOffers(props.product).slice(0, 3))
 const discount = computed(() => discountPct(best.value))
 const tint = computed(() => categoryById[props.product.category]?.tint)
+const photoBroken = ref(false)
 const qty = computed({
   get: () => qtyOf(props.product.id),
   set: (value) => setQty(props.product.id, value),
@@ -41,7 +42,8 @@ const qty = computed({
         <Icon :icon="FavouriteIcon" :size="18" />
       </button>
       <RouterLink :to="{ name: 'product', params: { id: product.id } }" class="product-image-link" :aria-label="productName(product)">
-        <span class="product-emoji" aria-hidden="true">{{ product.emoji }}</span>
+        <img v-if="product.imageUrl && !photoBroken" class="product-photo" :src="product.imageUrl" alt="" @error="photoBroken = true" />
+        <span v-else class="product-emoji" aria-hidden="true">{{ product.emoji }}</span>
       </RouterLink>
       <span class="size">{{ productSize(product) }}</span>
     </div>

@@ -1,8 +1,7 @@
-// Signed-in session.
-// TODO(backend): replace logIn / register with calls to the accounts API.
-// Until then this only keeps { name, email, phone } of the current session in the
-// browser. Passwords are never stored or sent anywhere from here.
-import { reactive, computed } from 'vue'
+// Signed-in session. The password is checked by the persistance API and is
+// never written here. The browser keeps the account id and the spending caps.
+import { reactive, computed, watch } from 'vue'
+import { loginAccount, registerAccount } from '../lib/api.js'
 
 const STORAGE_KEY = 'tg-session'
 
@@ -15,6 +14,8 @@ function load() {
 }
 
 export const session = reactive({ user: load() })
+export let accountRevision = 0
+watch(() => session.user?.id, () => { accountRevision++ }, { flush: 'sync' })
 export const isLoggedIn = computed(() => Boolean(session.user))
 
 function setUser(user, remember = true) {
@@ -27,16 +28,41 @@ function setUser(user, remember = true) {
   }
 }
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-export async function logIn({ email, remember }) {
-  await wait(600)
-  setUser({ name: email.split('@')[0], email }, remember)
+function sessionUser(profile) {
+  return {
+    id: profile.id,
+    email: profile.email,
+    name: profile.name,
+    phone: profile.phone || null,
+    membership: profile.membership,
+    role: profile.role,
+    is_admin: profile.role === 'admin',
+    monthly_cap: profile.monthly_cap,
+    per_order_cap: profile.per_order_cap,
+    bulk_ceiling: profile.bulk_ceiling,
+  }
 }
 
-export async function register({ name, email, phone }) {
-  await wait(800)
-  setUser({ name, email, phone: phone || null })
+export async function logIn({ email, password, remember }) {
+  const profile = await loginAccount({ email, password })
+  setUser(sessionUser(profile), remember)
+}
+
+export async function register({ name, email, phone, password, marketing }) {
+  const profile = await registerAccount({
+    name,
+    email,
+    phone: phone || '',
+    password,
+    marketing: Boolean(marketing),
+  })
+  setUser(sessionUser(profile), true)
+}
+
+export function syncProfile(profile, accountId = profile.id) {
+  if (!session.user || session.user.id !== accountId) return
+  const remember = Boolean(load())
+  setUser({ ...session.user, ...sessionUser({ ...session.user, ...profile, id: accountId }) }, remember)
 }
 
 export function logOut() {

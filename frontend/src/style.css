@@ -135,6 +135,8 @@ h2 { font-size: 1rem; margin-bottom: 12px; }
 .approval.closed .timer { color: var(--muted); }
 .approval.closed .timer-bar div { background: var(--muted); }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.actions.single { grid-template-columns: 1fr; }
+.step-up-note { margin: 12px 0 0; }
 
 /* ---- Budget ---- */
 .budget-big { font-size: 1.8rem; font-weight: 700; margin-bottom: 10px; }
@@ -163,7 +165,7 @@ h2 { font-size: 1rem; margin-bottom: 12px; }
 .trace li.broken::before { background: var(--bad); }
 .trace-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 4px; }
 .trace-event { font-weight: 600; }
-.thought { font-size: 0.9rem; }
+.thought { font-size: 0.9rem; white-space: pre-line; }
 .trace .muted { font-size: 0.85rem; }
 .hashes { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
 .basket-lines { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; }

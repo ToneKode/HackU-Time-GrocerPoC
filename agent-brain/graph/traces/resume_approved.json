@@ -1,0 +1,34 @@
+{
+  "scenario": "resume_approved",
+  "intent": "Buy bulk toilet paper",
+  "tools_implemented": false,
+  "expected_plan_status": "COMPLETED",
+  "path": [
+    "route_entry",
+    "execute_payment",
+    "audit_payment"
+  ],
+  "audit_log": [
+    {
+      "index": 0,
+      "ts": "2026-10-03T12:00:00Z",
+      "event": "PAYMENT",
+      "status": "RECORDED",
+      "reason": "Payment tool body is not implemented. The call is recorded.",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "361f14ed1b66bec3c7acfe9cb865dbea97ea945f6486cab432fa6302daf976a0",
+      "node": "execute_payment",
+      "stage": "action",
+      "thought": "Charge the landed total. This node runs only after PASS, or after the mother has APPROVED.",
+      "call": "POST http://localhost:8000/pay",
+      "action_input": {
+        "cart_total": 799.0,
+        "payment_route": "mastercard",
+        "idempotency_key": "SKU003:1:ESCALATE:esc_demo"
+      },
+      "rule": "pay_allowed_only_after = PASS, APPROVED",
+      "tool_called": false,
+      "guard": "passed because escalation status is APPROVED"
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 {
-  "for": ["person_3", "person_4"],
+  "for": [
+    "person_3",
+    "person_4"
+  ],
   "from": "person_1",
   "currency": "HKD",
   "replaces_for_baskets": "frontend/contract.json stays the single-item screen guide. This file is the basket contract.",
@@ -13,14 +16,36 @@
     "cart": {
       "method": "POST",
       "url": "http://127.0.0.1:8000/cart",
-      "body": {"items": [{"sku": "SKU001", "qty": 1}, {"sku": "SKU028", "qty": 1}]},
+      "body": {
+        "items": [
+          {
+            "sku": "SKU001",
+            "qty": 1
+          },
+          {
+            "sku": "SKU028",
+            "qty": 1
+          }
+        ]
+      },
       "ignored": "A top-level merchant field. Each line keeps the merchant stored on the product.",
-      "returns": ["line_items", "subtotal", "shipping_fee", "tax", "total_landed_cost", "currency"]
+      "returns": [
+        "line_items",
+        "subtotal",
+        "shipping_fee",
+        "tax",
+        "total_landed_cost",
+        "currency"
+      ]
     },
     "pay": {
       "method": "POST",
       "url": "http://127.0.0.1:8000/pay",
-      "body": {"cart_total": 79.8, "payment_route": "mastercard", "idempotency_key": "string"},
+      "body": {
+        "cart_total": 79.8,
+        "payment_route": "mastercard",
+        "idempotency_key": "string"
+      },
       "does_not_choose_payment_route": true,
       "does_not_apply_promos": true,
       "declines_when_cart_total_is": 666.0,
@@ -36,9 +61,20 @@
     "call": {
       "method": "POST",
       "url": "http://127.0.0.1:8002/agent/intent",
-      "body": {"intent": "string", "monthly_spent": 0, "escalation_id": "omit on a new purchase"}
+      "body": {
+        "intent": "string",
+        "monthly_spent": 0,
+        "escalation_id": "omit on a new purchase"
+      }
     },
-    "do_not_call": ["GET /products", "POST /cart", "POST /pay", "POST /check_policy", "POST /log_event", "POST /create_escalation"],
+    "do_not_call": [
+      "GET /products",
+      "POST /cart",
+      "POST /pay",
+      "POST /check_policy",
+      "POST /log_event",
+      "POST /create_escalation"
+    ],
     "render_lines_when": "lines is non-empty. One row per line, with product_reason and merchant_reason.",
     "render_question_when": "status == NEEDS_INPUT. Do not show a paid order and do not start the approval timer.",
     "reply": "Send the shopper's answer as a new intent. The agent does not yet apply 'make the swap' or 'send for approval'.",
@@ -72,8 +108,14 @@
       "intent": "cheap toilet paper and a cheap food container",
       "expect": {
         "status": "COMPLETED",
-        "skus": ["SKU001", "SKU028"],
-        "merchants": ["Watsons", "Japan Home Centre"],
+        "skus": [
+          "SKU001",
+          "SKU028"
+        ],
+        "merchants": [
+          "Watsons",
+          "Japan Home Centre"
+        ],
         "total_landed_cost": 79.8,
         "policy": "PASS",
         "payment": 79.8
@@ -85,7 +127,10 @@
       "first_basket": 520.0,
       "after_swap": 494.0,
       "saved": 26.0,
-      "policy_rounds": ["ESCALATE at 520.00", "PASS at 494.00"],
+      "policy_rounds": [
+        "ESCALATE at 520.00",
+        "PASS at 494.00"
+      ],
       "audit_includes": "BASKET_REVISED"
     },
     {
@@ -104,10 +149,16 @@
       "intent": "cheap toilet paper and everyday rice",
       "expect": {
         "status": "COMPLETED",
-        "paid_skus": ["SKU001", "SKU005"],
+        "paid_skus": [
+          "SKU001",
+          "SKU005"
+        ],
         "total_landed_cost": 127.9,
         "payment": 127.9,
-        "logged_lines": ["SKU001", "SKU005"]
+        "logged_lines": [
+          "SKU001",
+          "SKU005"
+        ]
       }
     },
     {
@@ -115,7 +166,18 @@
       "intent": "one cheap item from every category",
       "expect": {
         "status": "COMPLETED",
-        "skus": ["SKU001", "SKU004", "SKU007", "SKU010", "SKU013", "SKU016", "SKU019", "SKU022", "SKU025", "SKU028"],
+        "skus": [
+          "SKU001",
+          "SKU004",
+          "SKU007",
+          "SKU010",
+          "SKU013",
+          "SKU016",
+          "SKU019",
+          "SKU022",
+          "SKU025",
+          "SKU028"
+        ],
         "total_landed_cost": 326.6,
         "policy": "PASS",
         "payment": 326.6,
@@ -128,7 +190,18 @@
       "expect": {
         "status": "NEEDS_INPUT",
         "merchant": "HKTVmall",
-        "skus": ["SKU002", "SKU005", "SKU008", "SKU010", "SKU014", "SKU017", "SKU020", "SKU023", "SKU025", "SKU029"],
+        "skus": [
+          "SKU002",
+          "SKU005",
+          "SKU008",
+          "SKU010",
+          "SKU014",
+          "SKU017",
+          "SKU020",
+          "SKU023",
+          "SKU025",
+          "SKU029"
+        ],
         "total_landed_cost": 568.7,
         "payment": null,
         "reply": "Code compared the shops and locked the basket to HKTVmall. The landed total is over HK$500, so the agent asks before paying."
@@ -157,5 +230,26 @@
       "Next step, not required for the current agent: POST /cart takes payment_route and returns the discount and the reduced total. Person 1 will keep charging the unreduced total until that exists.",
       "One request, one charge. Split tender is outside this contract."
     ]
+  },
+  "market_settings": {
+    "service": "persistence",
+    "profile_role": "role === 'admin' (backend-issued)",
+    "public_rules": "GET /market/rules returns {version, merchant_discounts: [{merchant, percent: 0..100, threshold}], sku_gifts: [{sku, gift_sku}]}",
+    "admin_get": "GET /admin/market/rules?account_id={actor}",
+    "admin_put": "PUT /admin/market/rules body {account_id, rules: {merchant_discounts, sku_gifts}}",
+    "admin_header": "X-Admin-Password: actual account password; page memory only, never localStorage",
+    "catalog_update": "PATCH /admin/catalog/{sku} body {account_id, price}; same admin header",
+    "form_adapter": "percent = rate * 100; enabled rules only; new same-SKU BOGO uses gift_sku = sku; preserve existing gift_sku",
+    "authorization": "Backend enforces admin role and password."
+  },
+  "gift_display": {
+    "shape": "gifts: [{sku, name, merchant, qty, unit_price: 0, line_total: 0, promotion_id?, reason?}]",
+    "locations": [
+      "ActionPlan.gifts or settlement.gifts or settlement.merchants[].gifts",
+      "POST /accounts/{id}/orders/settle body.gifts",
+      "GET /accounts/{id}/dashboard orders[].gifts",
+      "Inline lines[].is_gift in plans, settlements and dashboard orders"
+    ],
+    "quantity": "Backend-derived, read-only; gifts excluded from paid/editable display rows; separate gift lists preferred to avoid duplicate inline display."
   }
 }

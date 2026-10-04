@@ -15,8 +15,11 @@ def money(value: float) -> float:
 
 
 class FileMall:
-    def __init__(self, folder: Path = ROOT):
-        self.products = json.loads((folder / "products.json").read_text(encoding="utf-8"))
+    def __init__(self, folder: Path = ROOT, products: list[dict] | None = None):
+        if products is None:
+            self.products = json.loads((folder / "products.json").read_text(encoding="utf-8"))
+        else:
+            self.products = products
         self.merchants = json.loads((folder / "merchants.json").read_text(encoding="utf-8"))
         self.rules = json.loads((folder / "rules.json").read_text(encoding="utf-8"))
         self._by_sku = {item["id"]: item for item in self.products}

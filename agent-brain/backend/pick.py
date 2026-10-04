@@ -100,3 +100,26 @@ def _match_query(catalog: list[dict], query: str) -> list[dict]:
         if tokens and all(tok in hay for tok in tokens):
             found.append(item)
     return found
+
+
+PLANNER_SHELF_LIMIT = 40
+
+
+def planner_shelf(intent: str, catalog: list[dict], limit: int = PLANNER_SHELF_LIMIT) -> list[dict]:
+    """Short list for the model. Code still searches the full shelf afterwards."""
+    if len(catalog) <= limit:
+        return catalog
+    hits = _match_query(catalog, intent)
+    if len(hits) > limit:
+        hits = sorted(hits, key=lambda item: (float(item.get("price") or 0), str(item.get("id") or "")))
+        hits = hits[:limit]
+    if hits:
+        return hits
+    cheapest: dict[str, dict] = {}
+    for item in catalog:
+        category = str(item.get("category") or "")
+        price = float(item.get("price") or 0)
+        current = cheapest.get(category)
+        if current is None or price < float(current.get("price") or 0):
+            cheapest[category] = item
+    return list(cheapest.values())[:limit]

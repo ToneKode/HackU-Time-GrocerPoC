@@ -1,0 +1,28 @@
+# Postgres for the policy ledger, escalations, and the seeded shop records.
+# From the repo root: Set-Location infra; docker compose up -d
+
+name: timegrocer-infra
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: timegrocer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-timegrocer}
+      POSTGRES_USER: ${POSTGRES_USER:-timegrocer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timegrocer}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - timegrocer_pg_data:/var/lib/postgresql/data
+      - ./postgres/init/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./postgres/seed/001_demo_seed.sql:/docker-entrypoint-initdb.d/002_demo_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  timegrocer_pg_data:

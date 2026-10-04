@@ -4,10 +4,10 @@
 // Account, language, theme, favourites and info pages.
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import {
-  Cancel01Icon, Login01Icon, UserAdd01Icon, Logout01Icon, TranslateIcon, Moon02Icon, FavouriteIcon,
+  Cancel01Icon, Login01Icon, UserAdd01Icon, Logout01Icon, TranslateIcon, Moon02Icon, FavouriteIcon, UserCheck01Icon,
   InformationCircleIcon, LegalDocument01Icon, ReturnRequestIcon, Shield01Icon,
   ArrowRight01Icon, ArrowLeft01Icon, Tick02Icon,
-  Sun03Icon, ComputerIcon,
+  Sun03Icon, ComputerIcon, Analytics01Icon,
 } from '@hugeicons/core-free-icons'
 import { useI18n } from 'vue-i18n'
 import { LOCALES, setLocale } from '../../i18n/index.js'
@@ -45,11 +45,38 @@ function chooseTheme(name) {
 }
 const router = useRouter()
 
-const settings = computed(() => [
-  { id: 'language', icon: TranslateIcon, label: t('menu.language'), value: currentLanguage.value, action: () => showView('language') },
-  { id: 'theme', icon: resolvedTheme.value === 'dark' ? Moon02Icon : Sun03Icon, label: t('menu.theme'), value: themeLabel(themePref.value), action: () => showView('theme') },
-  { id: 'favourites', icon: FavouriteIcon, label: t('menu.favourites'), count: favouriteCount.value, action: () => router.push('/favourites') },
-])
+const settings = computed(() => {
+  const rows = [
+    { id: 'language', icon: TranslateIcon, label: t('menu.language'), value: currentLanguage.value, action: () => showView('language') },
+    { id: 'theme', icon: resolvedTheme.value === 'dark' ? Moon02Icon : Sun03Icon, label: t('menu.theme'), value: themeLabel(themePref.value), action: () => showView('theme') },
+    { id: 'favourites', icon: FavouriteIcon, label: t('menu.favourites'), count: favouriteCount.value, action: () => router.push('/favourites') },
+  ]
+  if (session.user) {
+    rows.unshift({
+      id: 'dashboard',
+      icon: Analytics01Icon,
+      label: t('menu.dashboard'),
+      action: () => {
+        router.push('/dashboard')
+        emit('close')
+      },
+    })
+    rows.unshift({
+      id: 'profile',
+      icon: UserCheck01Icon,
+      label: t('menu.profile'),
+      action: () => {
+        router.push('/profile')
+        emit('close')
+      },
+    })
+  }
+  if (session.user?.role === 'admin') rows.unshift({
+    id: 'market-settings', icon: Shield01Icon, label: 'Market settings',
+    action: () => { router.push('/admin/market'); emit('close') },
+  })
+  return rows
+})
 const pages = computed(() => [
   { id: 'about', icon: InformationCircleIcon, label: t('menu.about') },
   { id: 'terms', icon: LegalDocument01Icon, label: t('menu.terms') },
@@ -168,7 +195,7 @@ onBeforeUnmount(() => {
 
         <!-- Settings -->
         <section class="menu-section menu-view">
-          <button v-for="item in settings" :key="item.id" type="button" class="menu-row" @click="item.action?.()">
+          <button v-for="item in settings" :key="item.id" :data-testid="item.id" type="button" class="menu-row" @click="item.action?.()">
             <Icon :icon="item.icon" :size="20" class="menu-row-icon" />
             <span class="menu-row-text">
               <span v-if="item.value" class="menu-row-label">{{ item.label }}</span>
@@ -181,7 +208,7 @@ onBeforeUnmount(() => {
 
         <!-- Info pages -->
         <section class="menu-section">
-          <button v-for="item in pages" :key="item.id" type="button" class="menu-row" @click="router.push(`/${item.id}`)">
+          <button v-for="item in pages" :key="item.id" :data-testid="item.id" type="button" class="menu-row" @click="router.push(`/${item.id}`)">
             <Icon :icon="item.icon" :size="20" class="menu-row-icon" />
             <span class="menu-row-main">{{ item.label }}</span>
           </button>

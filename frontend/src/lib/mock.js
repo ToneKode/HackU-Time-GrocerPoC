@@ -163,7 +163,98 @@ export async function decide(id, decision) {
   return structuredClone(record.escalation)
 }
 
+export async function authorizePayment({ payment_id }) {
+  await wait(200)
+  return {
+    success: true,
+    order_id: 'ORD-mock',
+    charged: 59.9,
+    currency: 'HKD',
+    payment_route: 'mastercard',
+    ts: new Date().toISOString(),
+    error: null,
+    payment_id,
+  }
+}
+
+export async function confirmBasket({ lines = [] }) {
+  await wait(120)
+  const priced = lines.map((line) => ({
+    sku: line.sku,
+    name: line.sku,
+    merchant: 'Watsons',
+    qty: line.qty || 1,
+    unit_price: 29.9,
+    line_total: 29.9 * (line.qty || 1),
+    image_url: '',
+  }))
+  const subtotal = priced.reduce((sum, line) => sum + line.line_total, 0)
+  return {
+    intent: 'mock',
+    status: 'READY',
+    payment: null,
+    payment_draft: null,
+    lines: priced,
+    settlement: {
+      currency: 'HKD',
+      subtotal,
+      discount: 0,
+      shipping_fee: subtotal >= 400 ? 0 : 30,
+      tax: 0,
+      total: subtotal + (subtotal >= 400 ? 0 : 30),
+      merchants: [
+        {
+          merchant: 'Watsons',
+          subtotal,
+          payable: subtotal,
+          payment: { route: 'mastercard', label: 'Mox Mastercard', bank: 'Mox', last4: '4242', amount: subtotal },
+          lines: priced,
+          because: 'Mock tender',
+        },
+      ],
+      benefits: [{ kind: 'cash', amount: 1, detail: 'Mock cashback' }],
+    },
+    question: '',
+    reply: 'Rules checked again.',
+    audit_log: [],
+    react: [],
+  }
+}
+
+export async function approveBasket({ amount }) {
+  await wait(120)
+  return { ...pay(amount), payment_id: 'pay-mock' }
+}
+
 export async function getAuditLog() {
   await wait(80)
   return structuredClone(lastAuditLog)
+}
+
+export async function getAlternatives(body) {
+  return { sku: body?.sku || '', alternatives: [] }
+}
+
+// Mock mode only (VITE_USE_MOCK=true): empty dashboard, no invented numbers.
+export async function getDashboard(accountId) {
+  return {
+    account_id: accountId, lifetime_spent: 0, orders_paid: 0, average_order: 0, goods_total: 0, fees_and_offers: 0,
+    categories: [], orders: [], monthly: [], orders_by_status: {},
+    benefits: { totals: { cash: 0, asiamiles: 0, membership_points: 0, loyalty_points: 0 }, by_method: [], entries: 0 },
+  }
+}
+
+export async function getPolicyStats(accountId) {
+  return {
+    account_id: accountId, checks: 0, runs_checked: 0, runs_failed: 0, runs_halted: 0, runs_escalated: 0, runs_passed: 0,
+    by_rule: [], recent_failures: [], escalations: { count: 0, by_status: {}, recent: [] },
+  }
+}
+
+export function recoverPayment(body) {
+  return authorizePayment(body)
+}
+
+export async function recoverOrders() {
+  return { recovered: [], pending: [] }
 }

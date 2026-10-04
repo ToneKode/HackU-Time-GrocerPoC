@@ -48,14 +48,31 @@ def policy_snapshot(result: dict) -> dict:
     }
 
 
+# Same order as the policy engine. A later rule is not claimed if an earlier one failed.
+_POLICY_RULES = (
+    "merchant_blacklisted",
+    "merchant_not_whitelisted",
+    "category_blacklisted",
+    "monthly_cap",
+    "over_bulk_ceiling",
+    "over_per_transaction_cap",
+    "pass",
+)
+
+
 def engine_thought(result: dict) -> str:
-    snap = policy_snapshot(result)
-    return (
-        f"Policy engine result: status {snap['status']}, rule {snap['rule']}, "
-        f"reason {snap['reason']}, amount HK${snap['amount']:.2f}, "
-        f"monthly_remaining HK${snap['monthly_remaining']:.2f}, "
-        f"caps {snap['per_transaction_cap']}/{snap['bulk_ceiling']}/{snap['monthly_cap']}."
-    )
+    fired = result.get("rule") or "rule"
+    outcome = "passed" if result.get("status") == "PASS" else "failed"
+    lines: list[str] = []
+    if fired in _POLICY_RULES:
+        for rule in _POLICY_RULES:
+            if rule == fired:
+                lines.append(f"checked {rule} {outcome}")
+                break
+            lines.append(f"checked {rule} passed")
+    else:
+        lines.append(f"checked {fired} {outcome}")
+    return "\n".join(lines)
 
 
 def _policy_event(reason: str, result: dict) -> dict:
@@ -141,27 +158,63 @@ class PolicyClient:
         monthly_spent: float,
         sku: str = "",
         qty: int = 1,
+        monthly_cap: float | None = None,
+        per_transaction_cap: float | None = None,
+        bulk_ceiling: float | None = None,
+        tags: dict | None = None,
     ) -> dict:
-        remote = self._post(
-            "/check_policy",
-            {
-                "merchant": merchant,
-                "category": category,
-                "amount": amount,
-                "currency": "HKD",
-                "sku": sku,
-                "qty": qty,
-                "monthly_spent": monthly_spent,
-            },
+        payload = {
+            "merchant": merchant,
+            "category": category,
+            "amount": amount,
+            "currency": "HKD",
+            "sku": sku,
+            "qty": qty,
+            "monthly_spent": monthly_spent,
+        }
+        if monthly_cap is not None:
+            payload["monthly_cap"] = monthly_cap
+        if per_transaction_cap is not None:
+            payload["per_transaction_cap"] = per_transaction_cap
+        if bulk_ceiling is not None:
+            payload["bulk_ceiling"] = bulk_ceiling
+        # account_id / run_id / stage let :8001 record the verdict per shopper.
+        for key in ("account_id", "run_id", "stage"):
+            if (tags or {}).get(key):
+                payload[key] = str(tags[key])[:64]
+        remote = self._post("/check_policy", payload)
+        local = decide(
+            merchant,
+            category,
+            amount,
+            monthly_spent,
+            monthly_cap=monthly_cap,
+            per_transaction_cap=per_transaction_cap,
+            bulk_ceiling=bulk_ceiling,
         )
         if remote and remote.get("status") in {"PASS", "ESCALATE", "HALT"} and remote.get("reason"):
-            filled = decide(merchant, category, amount, monthly_spent)
-            filled.update({key: remote[key] for key in filled if key in remote})
-            return filled
-        return decide(merchant, category, amount, monthly_spent)
+            local.update({key: remote[key] for key in local if key in remote})
+            return local
+        return local
 
-    def check_lines(self, lines: list[dict], amount: float, monthly_spent: float) -> tuple[dict, list[dict]]:
+    def check_lines(
+        self,
+        lines: list[dict],
+        amount: float,
+        monthly_spent: float,
+        monthly_cap: float | None = None,
+        per_transaction_cap: float | None = None,
+        bulk_ceiling: float | None = None,
+        tags: dict | None = None,
+    ) -> tuple[dict, list[dict]]:
         """Judge every line, then the landed total. Each call becomes one audit row."""
+        caps = {
+            "monthly_cap": monthly_cap,
+            "per_transaction_cap": per_transaction_cap,
+            "bulk_ceiling": bulk_ceiling,
+        }
+        if tags:
+            caps["tags"] = tags
         events = []
         halted = None
         for index, line in enumerate(lines, start=1):
@@ -172,6 +225,7 @@ class PolicyClient:
                 monthly_spent=monthly_spent,
                 sku=line["sku"],
                 qty=int(line["qty"]),
+                **caps,
             )
             events.append(_policy_event(f"line {index} {line['sku']} {line['merchant']}: {result['reason']}", result))
             if halted is None and result.get("rule") in {"category_blacklisted", "merchant_blacklisted", "merchant_not_whitelisted"}:
@@ -191,12 +245,20 @@ class PolicyClient:
             monthly_spent=monthly_spent,
             sku=lines[0]["sku"],
             qty=1,
+            **caps,
         )
         landed = f"{round(float(amount), 2):.2f}"
         events.append(_policy_event(f"basket landed {landed}: {total['reason']}", total))
         return total, events
 
-    def create_escalation(self, draft: dict) -> dict:
+    def create_escalation(
+        self, draft: dict, *, account_id: str | None = None,
+        run_id: str | None = None, order_id: str | None = None,
+    ) -> dict:
+        draft = dict(draft)
+        for key, value in (("account_id", account_id), ("run_id", run_id), ("order_id", order_id)):
+            if value is not None:
+                draft[key] = value
         escalation_id = "esc_" + uuid.uuid4().hex[:8]
         expires = datetime.now(timezone.utc) + timedelta(seconds=TTL_SECONDS)
         record = {
@@ -208,19 +270,23 @@ class PolicyClient:
             "remaining_seconds": TTL_SECONDS,
             "_expires_at": expires.isoformat(),
         }
-        remote = self._post(
-            "/create_escalation",
-            {
-                "amount": record["amount"],
-                "currency": record["currency"],
-                "merchant": record["merchant"],
-                "category": record.get("category") or (record.get("product") or {}).get("category") or "",
-                "sku": record["sku"],
-                "qty": int(draft.get("qty") or 1),
-                "reason": record["reason"],
-                "monthly_spent": float(record.get("monthly_spent") or 0),
-            },
-        )
+        payload = {
+            "amount": record["amount"],
+            "currency": record["currency"],
+            "merchant": record["merchant"],
+            "category": record.get("category") or (record.get("product") or {}).get("category") or "",
+            "sku": record["sku"],
+            "qty": int(draft.get("qty") or 1),
+            "reason": record["reason"],
+            "monthly_spent": float(record.get("monthly_spent") or 0),
+        }
+        for key in ("monthly_cap", "per_transaction_cap", "bulk_ceiling"):
+            if draft.get(key) is not None:
+                payload[key] = draft[key]
+        for key in ("account_id", "run_id", "order_id"):
+            if draft.get(key):
+                payload[key] = str(draft[key])[:64]
+        remote = self._post("/create_escalation", payload)
         if remote and remote.get("escalation_id"):
             record["escalation_id"] = remote["escalation_id"]
             for key in PUBLIC_ESCALATION_KEYS:
@@ -242,8 +308,8 @@ class PolicyClient:
             self.memory[escalation_id].update(record)
         return record
 
-    def log_event(self, event: str, status: str, reason: str) -> None:
-        self._post("/log_event", {"event": event, "status": status, "reason": reason})
+    def log_event(self, event: str, status: str, reason: str) -> dict | None:
+        return self._post("/log_event", {"event": event, "status": status, "reason": reason})
 
     def _refresh_ttl(self, record: dict) -> None:
         raw = record.get("_expires_at") or record.get("expires_at")
@@ -269,6 +335,239 @@ class PolicyClient:
             response = self.http.request(method, path, json=payload)
         except httpx.HTTPError:
             self.offline = True
+            return None
+        if response.status_code >= 400:
+            return None
+        body = response.json()
+        return body if isinstance(body, dict) else None
+
+
+class SpendClient:
+    """Monthly spend from persistance :8003. Falls back silently when offline."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8003",
+        http: httpx.Client | None = None,
+        account_id: str = "demo",
+        offline: bool = False,
+    ):
+        self.offline = offline
+        self.account_id = account_id
+        self.http = http or httpx.Client(base_url=base_url.rstrip("/"), timeout=0.5)
+
+    def get_monthly_spent(self, account_id: str | None = None) -> float | None:
+        account = account_id or self.account_id
+        body = self._request("GET", f"/spend/{account}", None)
+        if body is None or "spent" not in body:
+            return None
+        return float(body["spent"])
+
+    def record_payment(
+        self,
+        amount: float,
+        *,
+        account_id: str | None = None,
+        payment_id: str | None = None,
+        idempotency_key: str | None = None,
+        note: str = "",
+    ) -> dict | None:
+        if amount <= 0:
+            return None
+        return self._request(
+            "POST",
+            "/spend",
+            {
+                "account_id": account_id or self.account_id,
+                "amount": amount,
+                "currency": "HKD",
+                "payment_id": payment_id,
+                "idempotency_key": idempotency_key,
+                "note": note,
+            },
+        )
+
+    def _request(self, method: str, path: str, payload: dict | None) -> Any:
+        if self.offline:
+            return None
+        try:
+            response = self.http.request(method, path, json=payload)
+        except httpx.HTTPError:
+            self.offline = True
+            return None
+        if response.status_code >= 400:
+            return None
+        body = response.json()
+        return body if isinstance(body, dict) else None
+
+
+class ProfileClient:
+    """Shopper profile and order checkpoints on persistance :8003.
+
+    A missing account or a down API returns None. The shopping graph then
+    keeps the default caps and does not write an order row.
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8003",
+        http: httpx.Client | None = None,
+        offline: bool = False,
+    ):
+        self.offline = offline
+        self.http = http or httpx.Client(base_url=base_url.rstrip("/"), timeout=0.8)
+
+    def get_profile(self, account_id: str) -> dict | None:
+        body = self._request("GET", f"/accounts/{account_id}/profile")
+        return body if isinstance(body, dict) else None
+
+    def search_catalog(self, q: str = "", category: str = "", merchant: str = "", limit: int = 40, offset: int = 0) -> dict:
+        response = self.http.get("/catalog/search", params={"q": q, "category": category,
+                                 "merchant": merchant, "limit": limit, "offset": offset}, timeout=15.0)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("products"), list):
+            raise ValueError("Catalog search returned invalid data")
+        return body
+
+    def market_rules(self) -> dict:
+        """Fetch live rules without falling back to demo discounts on failure."""
+        from benefits import validate_rules
+
+        response = self.http.get("/market/rules", timeout=15.0)
+        response.raise_for_status()
+        return validate_rules(response.json())
+
+    def catalog_categories(self) -> list[dict]:
+        response = self.http.get("/catalog/categories", timeout=15.0)
+        response.raise_for_status()
+        return response.json()
+
+    def open_order(self, account_id: str, intent: str) -> str | None:
+        body = self._request("POST", "/orders", {"account_id": account_id, "intent": intent})
+        if not isinstance(body, dict):
+            return None
+        return body.get("id")
+
+    def checkpoint(self, order_id: str, **fields) -> dict | None:
+        body = self._request("POST", f"/orders/{order_id}/checkpoint", fields)
+        return body if isinstance(body, dict) else None
+
+    def settle(self, account_id: str, body: dict) -> dict | None:
+        """Record a captured payment as a paid order (idempotent on payment_id)."""
+        result = self._request("POST", f"/accounts/{account_id}/orders/settle", body, timeout=15.0)
+        return result if isinstance(result, dict) else None
+
+    def append_chat(self, account_id: str, role: str, content: str, order_id: str | None = None) -> None:
+        if not content:
+            return
+        self._request(
+            "POST",
+            f"/accounts/{account_id}/chat",
+            {"role": role, "content": content, "order_id": order_id},
+        )
+
+    def _request(self, method: str, path: str, payload: dict | None = None, *, timeout: float | None = None) -> Any:
+        if self.offline:
+            return None
+        try:
+            options = {"timeout": timeout} if timeout is not None else {}
+            response = self.http.request(method, path, json=payload, **options)
+        except httpx.HTTPError:
+            return None
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            return None
+        body = response.json()
+        if isinstance(body, (dict, list)):
+            return body
+        return None
+
+
+class PaymentClient:
+    """Payment service on :8004. Unknown results must be recovered by payment ID."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8004",
+        http: httpx.Client | None = None,
+        offline: bool = False,
+    ):
+        self.offline = offline
+        self.http = http or httpx.Client(base_url=base_url.rstrip("/"), timeout=2.0)
+
+    def draft(
+        self,
+        *,
+        amount: float,
+        merchant: str,
+        account_id: str = "demo",
+        intent: str = "",
+        sku: str = "",
+        qty: int = 1,
+        rail: str | None = None,
+    ) -> dict | None:
+        return self._request(
+            "POST",
+            "/payment/draft",
+            {
+                "account_id": account_id,
+                "amount": amount,
+                "currency": "HKD",
+                "merchant": merchant,
+                "intent": intent,
+                "sku": sku,
+                "qty": qty,
+                "rail": rail,
+            },
+        )
+
+    def draft_basket(self, *, account_id: str, intent: str, groups: list[dict],
+                     rules_version: int | None = None, trusted_draft_id: str | None = None) -> dict | None:
+        payload = {
+            "account_id": account_id, "intent": intent,
+            "groups": [{"merchant": group["merchant"], "amount": group["payment"]["amount"],
+                        "rail": group["payment"]["route"]} for group in groups],
+        }
+        if rules_version is not None:
+            if type(rules_version) is not int or rules_version < 0:
+                raise ValueError("rules_version must be a nonnegative integer")
+            payload["rules_version"] = rules_version
+        if trusted_draft_id is not None:
+            if not isinstance(trusted_draft_id, str) or not trusted_draft_id.strip():
+                raise ValueError("trusted_draft_id must be a nonempty string")
+            payload["trusted_draft_id"] = trusted_draft_id
+        return self._request("POST", "/payment/basket/draft", payload)
+
+    def get_payment(self, payment_id: str) -> dict | None:
+        return self._request("GET", f"/payment/{payment_id}", None)
+
+    def recover(self, payment_id: str) -> dict | None:
+        return self._request("POST", f"/payment/{payment_id}/recover", None)
+
+    def authorize(
+        self,
+        payment_id: str,
+        idempotency_key: str | None = None,
+        step_up_confirmed: bool = False,
+    ) -> dict | None:
+        return self._request(
+            "POST",
+            "/payment/authorize",
+            {
+                "payment_id": payment_id,
+                "idempotency_key": idempotency_key,
+                "step_up_confirmed": step_up_confirmed,
+            },
+        )
+
+    def _request(self, method: str, path: str, payload: dict | None) -> Any:
+        if self.offline:
+            return None
+        try:
+            response = self.http.request(method, path, json=payload)
+        except httpx.HTTPError:
             return None
         if response.status_code >= 400:
             return None

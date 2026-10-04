@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { cartCount, favouriteCount } from '../../stores/shop.js'
+import { session } from '../../stores/auth.js'
 import {
   Home01Icon, GridViewIcon, ShoppingCart01Icon, AiMagicIcon, Search01Icon, ShoppingBasket01Icon,
   Menu01Icon, FavouriteIcon,
@@ -60,6 +61,10 @@ const nav = [
             <span v-if="item.badge?.value" class="nav-badge">{{ item.badge.value }}</span>
           </span>
           <span class="nav-label">{{ $t(item.label) }}</span>
+        </RouterLink>
+        <RouterLink v-if="session.user?.role === 'admin'" to="/admin/market" class="nav-link" data-testid="market-settings-nav">
+          <span class="nav-icon"><Icon :icon="GridViewIcon" /></span>
+          <span class="nav-label">Market settings</span>
         </RouterLink>
       </nav>
 

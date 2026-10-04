@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+from benefits import explain_pick, rank_candidates
+from meal_plan import plan_meal
 from pick import _match_query, normalize_sell_point
 from policy_rules import CATEGORY_BLACKLIST, WHITELIST
 
@@ -85,11 +87,6 @@ def needs_for_every_category(intent: str, catalog: list[dict]) -> dict | None:
     }
 
 
-_GROCERY = (
-    ("rice", 42.0, 7),
-    ("water", 18.0, 3),
-    ("potato chips", 8.9, 2),
-)
 _VAGUE = ("something", "whatever", "anything", "not sure", "you decide", "up to you")
 _NAMED_PRODUCT = (
     "toilet",
@@ -106,32 +103,10 @@ _NAMED_PRODUCT = (
 
 
 def plan_fuzzy(intent: str, catalog: list[dict]) -> dict | None:
-    """A meal plan becomes several ingredients. A sentence with no product asks back.
-
-    catalog is unused; the shelf prices below match the cheap edible lines.
-    """
-    del catalog
+    """A meal plan is filled from the edible shelf. A sentence with no product asks back."""
     text = intent.casefold()
     if _is_meal_plan(text):
-        days = _days(text) or 7
-        budget = _budget(text) or 500.0
-        needs, landed = _grocery_guess(days, budget)
-        note = (
-            f"Fuzzy request: food for {days} days, budget HK${budget:.0f}. "
-            f"Guessed rice, water, and potato chips in quantities for those days, "
-            f"landed HK${landed:.2f}. "
-            "The HK$500 automatic cap is the most that can be paid without approval, "
-            "so the guess stays at or under that cap."
-        )
-        return {
-            "needs": needs,
-            "query": ", ".join(need["query"] for need in needs),
-            "qty": len(needs),
-            "sell_point": "cheap",
-            "thought": note,
-            "reply": note,
-            "model": "catalog",
-        }
+        return plan_meal(intent, catalog)
     if _is_too_vague(text):
         question = "What should I buy, or how many days and what budget should it cover?"
         return {
@@ -175,27 +150,6 @@ def _budget(text: str) -> float | None:
     return None
 
 
-def _grocery_guess(days: int, budget: float) -> tuple[list[dict], float]:
-    """Cheap edible lines, scaled to the days, then trimmed to the payable cap."""
-    limit = min(float(budget), 500.0)
-    plan = [[query, max(1, (days + span - 1) // span), price] for query, price, span in _GROCERY]
-    while plan and _guess_landed(plan) > limit + 0.001:
-        if plan[-1][1] > 1:
-            plan[-1][1] -= 1
-        else:
-            plan.pop()
-    needs = []
-    for index, (query, qty, _price) in enumerate(plan):
-        needs.append({"query": query, "qty": qty, "sell_point": "cheap", "priority": index + 1})
-    return needs, _guess_landed(plan) if plan else 0.0
-
-
-def _guess_landed(plan: list[list]) -> float:
-    subtotal = money(sum(price * qty for _query, qty, price in plan))
-    shipping = 0.0 if subtotal >= 400 else 30.0
-    return money(subtotal + shipping)
-
-
 def _fallback_query(catalog: list[dict], category: str) -> str:
     for item in catalog:
         if item.get("category") == category:
@@ -223,15 +177,20 @@ def needs_from(decision: dict) -> list[dict]:
             priority = int(item.get("priority") or (index + 1))
         except (TypeError, ValueError):
             priority = index + 1
-        needs.append(
-            {
-                "query": query,
-                "qty": qty,
-                "sell_point": sell,
-                "explicit": bool(sell),
-                "priority": priority,
-            }
-        )
+        row = {
+            "query": query,
+            "qty": qty,
+            "sell_point": sell,
+            "explicit": bool(sell),
+            "priority": priority,
+        }
+        sku = str(item.get("sku") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if sku:
+            row["sku"] = sku
+        if reason:
+            row["reason"] = reason
+        needs.append(row)
     return needs
 
 
@@ -303,6 +262,14 @@ def assign_same_merchant(intent: str, catalog: list[dict], needs: list[dict]) ->
 
 
 def options_for(catalog: list[dict], need: dict) -> list[dict]:
+    sku = str(need.get("sku") or "").strip()
+    if sku:
+        pinned = [item for item in catalog if str(item.get("id") or "") == sku]
+        merchant = str(need.get("merchant") or "").strip()
+        if merchant:
+            pinned = [item for item in pinned if item.get("merchant") == merchant]
+        if pinned:
+            return pinned
     hits = _match_query(catalog, need["query"])
     merchant = str(need.get("merchant") or "").strip()
     if merchant:
@@ -319,7 +286,7 @@ def options_for(catalog: list[dict], need: dict) -> list[dict]:
     return ranked
 
 
-def fit_basket(catalog, needs, monthly_spent, price, policy_check) -> dict:
+def fit_basket(catalog, needs, monthly_spent, price, policy_check, methods=None, benefit_rank=None) -> dict:
     picked = []
     option_sets = []
     for need in needs:
@@ -327,7 +294,7 @@ def fit_basket(catalog, needs, monthly_spent, price, policy_check) -> dict:
         if not options:
             raise LookupError(f"No product matched {need['query']}")
         option_sets.append(options)
-        picked.append(options[0])
+        picked.append(_prefer(options, need, methods, benefit_rank)[0])
 
     events = []
     repairs = []
@@ -344,7 +311,7 @@ def fit_basket(catalog, needs, monthly_spent, price, policy_check) -> dict:
             break
         seen.add(signature)
         drafts = [
-            _draft(need, product, option_sets[index])
+            _draft(need, product, option_sets[index], methods, benefit_rank)
             for index, (need, product) in enumerate(zip(needs, picked))
         ]
         quote = price([{"sku": draft["sku"], "qty": draft["qty"]} for draft in drafts])
@@ -462,7 +429,12 @@ def _sell_rank(item: dict, sell: str) -> int:
     return _DEFAULT_RANK.get(str(item.get("sell_point") or ""), 3)
 
 
-def _draft(need: dict, product: dict, options: list[dict]) -> dict:
+def _prefer(options: list[dict], need: dict, methods, benefit_rank) -> list[dict]:
+    """Sell point stays first. A card promotion wins only inside a close price band."""
+    return rank_candidates(options, need, methods, benefit_rank)
+
+
+def _draft(need: dict, product: dict, options: list[dict], methods=None, benefit_rank=None) -> dict:
     unit = money(product["price"])
     qty = int(need["qty"])
     return {
@@ -476,7 +448,9 @@ def _draft(need: dict, product: dict, options: list[dict]) -> dict:
         "qty": qty,
         "unit_price": unit,
         "line_total": money(unit * qty),
-        "product_reason": _product_reason(need, product),
+        "image_url": product.get("image_url") or "",
+        "product_reason": str(need.get("reason") or "").strip()
+        or explain_pick(need, product, options, methods, benefit_rank),
         "merchant_reason": _merchant_reason(need, product, options),
     }
 
@@ -638,15 +612,12 @@ def _picked(round_no: int, lines: list[dict]) -> dict:
     labels = [f"{line['category']} {line['sku']}" for line in lines]
     thoughts = []
     for line in lines:
-        thoughts.append(
-            f"{line['category']}: {line['sku']} {line['name']} from {line['merchant']} "
-            f"at HK${float(line['line_total']):.2f}. {line['product_reason']} {line['merchant_reason']}"
-        )
+        thoughts.append(line.get("product_reason") or line["sku"])
     return {
         "event": "BASKET_PICKED",
         "status": "RECORDED",
         "reason": f"round {round_no} picks " + ", ".join(labels),
-        "thought": " ".join(thoughts),
+        "thought": "\n".join(thoughts),
     }
 
 

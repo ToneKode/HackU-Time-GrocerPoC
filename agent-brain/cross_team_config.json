@@ -8,7 +8,8 @@
     "person_1": "agent-brain",
     "person_2": "backend-policy",
     "person_3": "frontend",
-    "person_4": "mockup-mall"
+    "person_4": "mockup-mall",
+    "persistance": "persistance"
   },
   "services": {
     "mock_api": {
