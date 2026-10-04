@@ -1,3 +1,8 @@
+demo-admin2@example.com	
+
+DemoAdmin2Only!
+
+
 # Time-Grocer student demo
 
 A mock shopping agent with a MySQL catalog, model-directed tools, basket optimization, approvals, recoverable mock payments and an admin market editor. No real payments are processed.
