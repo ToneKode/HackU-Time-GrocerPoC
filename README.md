@@ -1,6 +1,6 @@
-demo-admin2@example.com	
+demo-admin3@example.com	
 
-DemoAdmin2Only!
+DemoAdmin3Only!
 
 
 # Time-Grocer student demo
