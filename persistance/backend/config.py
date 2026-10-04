@@ -23,9 +23,17 @@ def env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+DEMO_ADMINS = (
+    "demo-admin@example.com", "demo-admin2@example.com",
+    "demo-admin3@example.com", "demo-admin4@example.com",
+)
+
+
 def settings() -> dict:
     return {
-        "demo_admin_emails": [email.strip().lower() for email in env("DEMO_ADMIN_EMAILS", "demo-admin@example.com").split(",") if email.strip()],
+        "demo_admin_emails": list(dict.fromkeys([*DEMO_ADMINS, *[
+            email.strip().lower() for email in env("DEMO_ADMIN_EMAILS", "").split(",") if email.strip()
+        ]])),
         "payment_url": env("PAYMENT_URL", "http://127.0.0.1:8004"),
         "port": int(env("PERSISTANCE_PORT", "8003")),
         "frontend_origin": env("FRONTEND_ORIGIN", "http://localhost:5173"),

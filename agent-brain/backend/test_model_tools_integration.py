@@ -30,6 +30,9 @@ class ToolModel:
         if self.turn==1:return call('search_catalog',{'category':'Snacks','limit':1})
         if self.fail:return {'content':'I will stop here.'}
         if self.turn==2:return call('optimize_basket',{'intent':'buy snacks under HK$100','lines':[{'sku':'live-snack','qty':1}]})
+        guidance=json.loads(messages[-1]['content'])['budget_guidance']
+        assert guidance['preference']=='balanced_value' and guidance['charged_ceiling']==100
+        assert guidance['remaining']==50
         return call('finish_plan',{'lines':[{'sku':'live-snack','qty':1,'reason':'Chosen from the searched crackers.'}],
                                    'summary':'Selected crackers within your budget.'})
 

@@ -48,6 +48,33 @@ class ScriptedChat:
         return response(messages) if callable(response) else response
 
 
+def test_batch_search_reduces_three_targets_to_one_call_and_audits_each():
+    def catalog(**filters):
+        if filters['q'] == 'unavailable': raise ValueError('Merchant feed unavailable')
+        row = {'id': A['sku'] if filters['offset'] == 0 else B['sku'], 'name': 'Snack'}
+        return {'products': [row], 'total_count': 305, 'has_more': True}
+    chat = ScriptedChat(reply(search(targets=[{'q': 'rice'}, {'q': 'nuts', 'offset': 1}, {'q': 'unavailable'}])),
+                        reply(optimize([A, B])), reply(finish([A, B])))
+    result = ToolPlanner(chat, catalog, Optimizer(), max_tool_calls=3)(INTENT)
+    targets = [e for e in result['decision_events'] if e['action'] == 'search_catalog_target']
+    assert len(targets) == 3 and targets[-1]['status'] == 'error'
+    assert targets[0]['result']['total_count'] == 305
+    evidence = json.loads(chat.requests[1][-1]['content'])
+    assert len(evidence['results']) == 3
+    assert result['needs'][1]['sku'] == B['sku']
+
+
+def test_multi_category_search_leaves_turns_for_optimization_and_finish():
+    chat = ScriptedChat(*[reply(search(category='Snacks', limit=1)) for _ in range(8)],
+                        reply(optimize([A])), reply(finish([A])))
+    result = ToolPlanner(chat, Catalog(), Optimizer(), max_rounds=16)(INTENT)
+    assert result['needs'][0]['sku'] == A['sku']
+    assert len(chat.requests) == 10
+    assert 'optimize a candidate basket now' in chat.requests[5][0]['content']
+    assert 'literal phrase substring' in chat.requests[0][0]['content']
+    assert result['decision_events'][-1]['action'] == 'finish_plan'
+
+
 class Catalog:
     def __init__(self):
         self.requests = []
@@ -111,7 +138,7 @@ def test_model_directs_filters_pagination_and_audited_final_basket():
     ]
     events = result["decision_events"]
     assert result["react"] == events
-    assert [event["sequence"] for event in events] == list(range(1, 9))
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert len([event for event in events if event["action"] == "model_decision"]) == 4
     for event in events:
         assert {"thought", "action", "args", "observation", "result"} <= event.keys()
@@ -146,7 +173,7 @@ def test_optimizer_swap_requires_search_and_optimization_of_final_selected_sku()
     chat = ScriptedChat(reply(search()), reply(optimize([A])), reply(finish([swapped])),
                         reply(search(offset=1)), reply(finish([swapped])),
                         reply(optimize([swapped])), reply(finish([swapped])))
-    result = ToolPlanner(chat, Catalog(), swap_optimizer)(INTENT)
+    result = ToolPlanner(chat, Catalog(), swap_optimizer, max_rounds=8)(INTENT)
     tools = tool_events(result["decision_events"])
     assert_error(tools[2], "not been seen")
     assert_error(tools[4], "exact final lines")
@@ -303,7 +330,7 @@ def test_plain_text_final_is_a_failure_and_hidden_reasoning_is_not_audited():
 def test_round_limit_stops_at_eight_model_decisions():
     chat = ScriptedChat(*(reply(search()) for _ in range(8)))
     with pytest.raises(ToolPlannerError) as caught:
-        ToolPlanner(chat, Catalog(), Optimizer())(INTENT)
+        ToolPlanner(chat, Catalog(), Optimizer(), max_rounds=8)(INTENT)
     assert len(chat.requests) == 8
     assert len(tool_events(caught.value.decision_events)) == 8
     assert "round limit" in str(caught.value)
@@ -313,7 +340,7 @@ def test_tool_limit_stops_before_twenty_fifth_callback_and_audits_rejection():
     catalog = Catalog()
     chat = ScriptedChat(reply(*(search() for _ in range(25))))
     with pytest.raises(ToolPlannerError) as caught:
-        ToolPlanner(chat, catalog, Optimizer())(INTENT)
+        ToolPlanner(chat, catalog, Optimizer(), max_tool_calls=24)(INTENT)
     assert len(catalog.requests) == 24
     events = tool_events(caught.value.decision_events)
     assert len(events) == 25 and events[-1]["status"] == "rejected"
@@ -322,11 +349,11 @@ def test_tool_limit_stops_before_twenty_fifth_callback_and_audits_rejection():
 
 def test_finish_can_be_the_twenty_fourth_call():
     chat = ScriptedChat(reply(*(search() for _ in range(22)), optimize([A]), finish([A])))
-    result = ToolPlanner(chat, Catalog(), Optimizer())(INTENT)
+    result = ToolPlanner(chat, Catalog(), Optimizer(), max_tool_calls=24)(INTENT)
     assert len(tool_events(result["decision_events"])) == 24
 
 
-@pytest.mark.parametrize("kwargs", [{"max_rounds": 9}, {"max_tool_calls": 25}, {"max_rounds": 0}])
+@pytest.mark.parametrize("kwargs", [{"max_rounds": 17}, {"max_tool_calls": 41}, {"max_rounds": 0}])
 def test_configuration_cannot_raise_hard_bounds(kwargs):
     with pytest.raises(ValueError):
         ToolPlanner(ScriptedChat(), Catalog(), Optimizer(), **kwargs)

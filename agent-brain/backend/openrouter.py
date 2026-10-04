@@ -16,7 +16,7 @@ import httpx
 
 from pick import normalize_sell_point
 
-DEFAULT_MODEL = "google/gemini-3.8-flash"
+DEFAULT_MODEL = "openrouter/free"
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM = """You are the reasoner for a Hong Kong grocery agent.
@@ -110,10 +110,12 @@ class OpenRouterPlanner:
         if not key:
             raise PlannerError("OPENROUTER_API_KEY is not set")
         model = (self.model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
+        if os.environ.get("OPENROUTER_FREE_ONLY", "true").lower() == "true" and model != "openrouter/free" and not model.endswith(":free"):
+            model = DEFAULT_MODEL
         if model.endswith(":batch"):
             raise PlannerError("Batch-only models cannot run interactive tools")
         payload = {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto",
-                   "reasoning": {"effort": "none"}, "max_tokens": 3000}
+                   "max_tokens": 1200}
         client = self.http or httpx.Client(timeout=60.0)
         try:
             response = client.post(API_URL, json=payload, headers={
@@ -150,10 +152,6 @@ class OpenRouterPlanner:
                 {"role": "user", "content": user},
             ],
             "response_format": {"type": "json_object"},
-            # Qwen puts the reply in `reasoning` and leaves `content` empty when
-            # effort is low, then hits the token cap before any JSON. The
-            # thought we need is a field in the JSON, so keep reasoning off.
-            "reasoning": {"effort": "none"},
             "max_tokens": max_tokens,
         }
         headers = {

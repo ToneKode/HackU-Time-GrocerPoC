@@ -25,14 +25,35 @@ CREATE USER IF NOT EXISTS 'tg'@'localhost' IDENTIFIED BY 'tg';
 GRANT ALL PRIVILEGES ON time_grocer.* TO 'tg'@'localhost';
 ```
 
-The persistence service applies its MySQL schema on startup. Configure the agent in `agent-brain/backend/.env` (keep this file local):
+The persistence service applies its MySQL schema on startup. Install Ollama and download the local tool-capable model:
 
-```dotenv
-OPENROUTER_API_KEY=YOUR_KEY
-OPENROUTER_MODEL=qwen/qwen3.6-plus
+```powershell
+ollama pull qwen3:8b
 ```
 
-Use a model that supports interactive tool calls. Leave `USE_SCRIPTED_PLANNER` unset for model-directed planning.
+Keep the Ollama app running, or run `ollama serve` in another terminal if its API is not already listening. Configure `agent-brain/backend/.env` locally if desired:
+
+```dotenv
+LLM_PROVIDER=vsakura
+GATEWAY_BASE_URL=https://apisub.vsakura.top
+GATEWAY_MODEL=gpt-6.1-sol
+OPENROUTER_API_KEY=YOUR_GATEWAY_KEY
+OLLAMA_MODEL=qwen3:8b
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+```
+
+The default provider is the OpenAI-compatible vsakura gateway with `gpt-6.1-sol`. `OPENROUTER_API_KEY` supplies this gateway's credential; it is not sent to OpenRouter. On a primary request failure, the same conversation continues on local Ollama for the rest of that plan, with an audited `provider_fallback` event. Each new shopping request tries the primary again. Set `LLM_PROVIDER=ollama` to use only local inference. Native `/api/chat` requests use thinking disabled, a 32,768-token context window and a 2,400 output-token cap. Local planning allows 16 model rounds and 40 tool calls, including multi-target catalog searches. Model loading or CPU inference can take several minutes; the larger context increases memory usage. Leave `USE_SCRIPTED_PLANNER` unset for model-directed planning. Keep Ollama running to support the local fallback. OpenRouter retains its economy limits.
+
+Optional local tuning in the agent terminal or `.env`:
+
+```dotenv
+OLLAMA_NUM_CTX=32768
+OLLAMA_NUM_PREDICT=2400
+OLLAMA_MAX_ROUNDS=16
+OLLAMA_MAX_TOOL_CALLS=40
+```
+
+If memory or speed becomes a problem, lower `OLLAMA_NUM_CTX` to `16384`. Restart the agent after changing these settings.
 
 Start Docker Desktop and the existing MySQL Windows service:
 
@@ -58,7 +79,7 @@ Set-Location C:\HacKU2026\persistance\backend
 $env:DATABASE_URL = "mysql://tg:tg@127.0.0.1:3306/time_grocer"
 $env:REDIS_URL = "redis://127.0.0.1:6379/0"
 $env:PAYMENT_URL = "http://127.0.0.1:8004"
-$env:DEMO_ADMIN_EMAILS = "demo-admin@example.com"
+$env:DEMO_ADMIN_EMAILS = "demo-admin@example.com,demo-admin2@example.com,demo-admin3@example.com,demo-admin4@example.com"
 py -3.13 -m uvicorn main:app --host 127.0.0.1 --port 8003
 ```
 
@@ -89,6 +110,11 @@ Set-Location C:\HacKU2026\agent-brain\backend
 $env:PERSISTANCE_API_BASE_URL = "http://127.0.0.1:8003"
 $env:POLICY_API_BASE_URL = "http://127.0.0.1:8001"
 $env:PAYMENT_API_BASE_URL = "http://127.0.0.1:8004"
+$env:LLM_PROVIDER = "vsakura"
+$env:GATEWAY_BASE_URL = "https://apisub.vsakura.top"
+$env:GATEWAY_MODEL = "gpt-6.1-sol"
+$env:OLLAMA_MODEL = "qwen3:8b"
+$env:OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 Remove-Item Env:MOCK_API_BASE_URL -ErrorAction SilentlyContinue
 Remove-Item Env:USE_SCRIPTED_PLANNER -ErrorAction SilentlyContinue
 py -3.13 server.py

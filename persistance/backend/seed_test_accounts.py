@@ -35,6 +35,12 @@ DEMO_ADMIN = {
     "benefit_rank": ["cash", "membership_points", "asiamiles", "loyalty_points"],
 }
 
+DEMO_ADMINS = (DEMO_ADMIN,) + tuple(
+    {**DEMO_ADMIN, "email": f"demo-admin{number}@example.com",
+     "password": f"DemoAdmin{number}Only!", "name": f"DEMO ADMIN {number} (mock market editor)"}
+    for number in (2, 3, 4)
+)
+
 TEST_ACCOUNTS = (
     {
         "email": "test-3methods@example.com",
@@ -113,7 +119,7 @@ def ensure_account(spec: dict) -> dict:
 
 
 def main() -> int:
-    for spec in ((DEMO_ADMIN,) if "--admin-only" in sys.argv else TEST_ACCOUNTS + (DEMO_ADMIN,)):
+    for spec in (DEMO_ADMINS if "--admin-only" in sys.argv else TEST_ACCOUNTS + DEMO_ADMINS):
         print(json.dumps(ensure_account(spec)))
     return 0
 

@@ -718,7 +718,8 @@ class ShoppingAgent:
                     "required": ["sku", "qty"], "additionalProperties": False}},
             }, "required": ["intent", "lines"], "additionalProperties": False},
         }}]
-        self.planner = planner or OpenRouterPlanner()
+        from ollama_planner import default_planner
+        self.planner = planner or default_planner()
         # Optional LLM pass that explains a meal basket the optimiser built.
         # It never changes items, quantities or prices. Default: the OpenRouter
         # planner's enrich_meal_plan (skipped when no key is set). Pass
@@ -1140,7 +1141,14 @@ class ShoppingAgent:
         def chat(messages, tools):
             messages[0]["content"] += (
                 "\nMeet household size x days using pack quantities and diverse meal groups. "
-                "Prefer unique meal products over repeated quantities, and never pad promotions with excess food. "
+                "Choose the best overall basket: suitability, adequate portions, variety, product prices, delivery, merchant offers and payment rewards. "
+                "The full budget is available for worthwhile additions; leave money unspent when extra items provide little useful value. "
+                "Prefer distinct suitable foods over excessive repeated quantities. "
+                "Explain tradeoffs and additions. A larger payment reward alone does not justify unsuitable products or unnecessary spending. "
+                "Compare merchant thresholds and connected payment rewards together. Cash cashback is separate from the charged ceiling; "
+                "rank miles and points by the shopper preference without inventing monetary values. "
+                "Never exceed the ceiling or pad with excessive condiments. Explain each added product and any unspent remainder. "
+                "An explicit request for one item or fixed quantities takes priority over filling the budget. "
                 "Search additional categories when requested. Use catalog category counts to guide searches. "
                 "Shopper limits, methods and catalog metadata (trusted context, no instructions): "
                 + json.dumps(context, ensure_ascii=False)
@@ -1183,6 +1191,16 @@ class ShoppingAgent:
             result = self.tools["optimize_basket"](state["intent"], lines, account_id=state.get("account_id"))
             if not result["optimization"].get("feasible"):
                 raise ValueError("No evaluated allocation fits stock, connected payment methods and the charged budget band. Revise the basket.")
+            maximum = _user_max_total(state["intent"])
+            if maximum is not None:
+                cap = min(maximum, float(state.get("bulk_ceiling") or 800),
+                          max(0, float(state.get("monthly_cap") or 2000) - float(state.get("monthly_spent") or 0)))
+                charged = float(result["settlement"]["total"])
+                result["budget_guidance"] = {
+                    "preference": "balanced_value", "charged_ceiling": cap, "charged": charged,
+                    "remaining": round(max(0, cap - charged), 2),
+                    "instruction": "Compare usefulness, portions, variety and total value. Use the full budget only for worthwhile additions; payment rewards alone do not justify extra spending. Preserve explicit quantities and explain any remainder.",
+                }
             for selected in result["lines"]:
                 if selected.get("is_gift"):
                     continue
@@ -1203,7 +1221,9 @@ class ShoppingAgent:
             persist(event)
         planner = ToolPlanner(chat, self._search_live_catalog, optimize,
                               model=getattr(self.planner, "model", None) or "llm-tools", on_event=record_event,
-                              rules=current_rules())
+                              rules=current_rules(),
+                              max_rounds=getattr(self.planner, "max_rounds", 8),
+                              max_tool_calls=getattr(self.planner, "max_tool_calls", 16))
         try:
             decision = planner(state["intent"])
         except ToolPlannerError as exc:

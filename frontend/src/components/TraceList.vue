@@ -11,7 +11,8 @@ function toolSummary(entry) {
   const result = evidence.result
   if (result?.error) return `${evidence.action}: ${typeof result.error === 'string' ? result.error : result.error.message}`
   if (evidence.action === 'candidate_policy') return `${result.product || result.sku}: ${result.verdict?.reason || ''}`
-  if (evidence.action === 'search_catalog') return `${evidence.action}: ${result.products.length} / ${result.total_count}`
+  if (evidence.action === 'search_catalog' && result.results) return `${evidence.action}: ${result.results.length} search targets`
+  if (evidence.action === 'search_catalog' || evidence.action === 'search_catalog_target') return `${evidence.action}: ${result.products?.length || 0} / ${result.total_count ?? 0}`
   if (evidence.action === 'optimize_basket') return `${evidence.action}: ${result.lines?.length || 0} items · HK$${Number(result.settlement?.total || 0).toFixed(2)}`
   return evidence.action
 }

@@ -14,6 +14,6 @@ const proxy = Object.fromEntries(
 
 export default defineConfig({
   plugins: [vue()],
-  server: { port: 5173, strictPort: true, proxy, allowedHosts: ['6f43-119-246-134-103.ngrok-free.app'] },
-  preview: { port: 5173, strictPort: true, proxy, allowedHosts: ['6f43-119-246-134-103.ngrok-free.app'] },
+  server: { port: 5173, strictPort: true, proxy, allowedHosts: ['7b83-118-140-62-215.ngrok-free.app'] },
+  preview: { port: 5173, strictPort: true, proxy, allowedHosts: ['7b83-118-140-62-215.ngrok-free.app'] },
 })

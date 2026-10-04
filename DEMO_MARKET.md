@@ -5,7 +5,17 @@ The admin page is `/admin/market`. Sign in with the provisioned mock account:
 - Email: `demo-admin@example.com`
 - Password: `DemoAdminOnly!`
 
-Enter that password again in Market settings to load/save shared rules. Admin requests verify the database account's role allowlist and password. `DEMO_ADMIN_EMAILS` can configure the allowlist; its default is `demo-admin@example.com`. Ordinary shopper accounts cannot open the page or write through the API.
+Additional mock admins:
+
+| Email | Password |
+|---|---|
+| `demo-admin2@example.com` | `DemoAdmin2Only!` |
+| `demo-admin3@example.com` | `DemoAdmin3Only!` |
+| `demo-admin4@example.com` | `DemoAdmin4Only!` |
+
+Run `py -3.13 seed_test_accounts.py --admin-only` from `persistance/backend` to provision all four. The four provisioned demo addresses are always included in the demo admin allowlist. `DEMO_ADMIN_EMAILS` adds extra addresses.
+
+Enter that password again in Market settings to load/save shared rules. Admin requests verify the database account's role allowlist and password. `DEMO_ADMIN_EMAILS` can add addresses to the four demo admins. Ordinary shopper accounts cannot open the page or write through the API.
 
 Restart persistence (8003), payment (8004), and agent (8002) after loading this implementation. Keep existing MySQL/Redis/frontend/ngrok running. Payment needs `PERSISTANCE_API_BASE_URL=http://127.0.0.1:8003`; persistence needs `PAYMENT_URL=http://127.0.0.1:8004`. No daily scraper is included.
 
